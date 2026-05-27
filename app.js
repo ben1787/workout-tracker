@@ -180,7 +180,11 @@ const views = {
       ],
     }, null, 2);
 
-    root.appendChild(el('p', { class: 'muted' }, 'Format: name + exercises. weight is vest weight (lbs).'));
+    root.appendChild(el('p', { class: 'muted' }, 'Have ChatGPT build a routine for you — copy the prompt below, paste it into ChatGPT, then paste its JSON output here.'));
+
+    root.appendChild(el('button', { class: 'ghost', on: { click: () => copyChatGPTPrompt() } }, '📋 Copy ChatGPT prompt'));
+
+    root.appendChild(el('p', { class: 'muted' }, 'Or paste workout JSON directly. Format: name + exercises. weight is vest weight (lbs).'));
 
     const ta = el('textarea', {
       placeholder: example,
@@ -350,6 +354,57 @@ function startTimerTick() {
 }
 function stopTimerTick() {
   if (tickInterval) { clearInterval(tickInterval); tickInterval = null; }
+}
+
+const CHATGPT_PROMPT = `I want you to build me a calisthenics workout. Respond with ONLY valid JSON — no commentary, no markdown code fences, no explanation. Just the raw JSON object.
+
+Schema:
+{
+  "name": "<workout name>",
+  "exercises": [
+    {
+      "name": "<exercise name>",
+      "sets": <integer, number of sets>,
+      "reps": <integer, target reps per set>,
+      "weight": <number, weighted-vest load in lbs; use 0 if no vest>
+    }
+  ]
+}
+
+Example output:
+{
+  "name": "Push Day",
+  "exercises": [
+    {"name": "Push-ups", "sets": 3, "reps": 12, "weight": 0},
+    {"name": "Dips", "sets": 3, "reps": 8, "weight": 20},
+    {"name": "Pike push-ups", "sets": 3, "reps": 8, "weight": 0}
+  ]
+}
+
+Rules:
+- Calisthenics only: bodyweight movements, optionally loaded with a weighted vest. No barbells, dumbbells, kettlebells, cables, or machines.
+- Pull-ups, dips, push-ups, rows, squats, lunges, pistol squats, L-sits, hollow holds, etc. are fine. Use vest weight on movements where it makes sense.
+- Output JSON only. Do not wrap in \`\`\`json fences.
+
+Now build the workout. Here is what I want:
+[REPLACE THIS LINE with what you want — e.g. "30-min push day, intermediate level, with 20lb vest where appropriate"]`;
+
+async function copyChatGPTPrompt() {
+  try {
+    await navigator.clipboard.writeText(CHATGPT_PROMPT);
+    toast('Prompt copied — paste into ChatGPT');
+  } catch {
+    // fallback for older iOS Safari
+    const ta = document.createElement('textarea');
+    ta.value = CHATGPT_PROMPT;
+    ta.style.position = 'fixed';
+    ta.style.opacity = '0';
+    document.body.appendChild(ta);
+    ta.select();
+    try { document.execCommand('copy'); toast('Prompt copied — paste into ChatGPT'); }
+    catch { toast('Copy failed — long-press the prompt manually'); }
+    ta.remove();
+  }
 }
 
 async function savePaste() {
