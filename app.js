@@ -356,38 +356,115 @@ function stopTimerTick() {
   if (tickInterval) { clearInterval(tickInterval); tickInterval = null; }
 }
 
-const CHATGPT_PROMPT = `I want you to build me a calisthenics workout. Respond with ONLY valid JSON — no commentary, no markdown code fences, no explanation. Just the raw JSON object.
+const CHATGPT_PROMPT = `You are generating a calisthenics workout for a tracker app. Your output MUST be a single valid JSON object that conforms exactly to the schema below. Output NOTHING ELSE — no commentary, no markdown code fences, no explanation, no leading or trailing text.
 
-Schema:
+==============================================================
+SCHEMA
+==============================================================
+
+Top-level: a JSON object with exactly two fields.
+
+  name (string, REQUIRED)
+    - Human-readable workout name shown in the app.
+    - Must be non-empty after trimming whitespace.
+    - Examples: "Push Day", "Full Body A", "Vest Conditioning".
+
+  exercises (array of objects, REQUIRED)
+    - Ordered list of exercises in the order they will be performed.
+    - Must contain at least one element.
+
+Each element of "exercises" is a JSON object with exactly four fields:
+
+  name (string, REQUIRED)
+    - Human-readable exercise name.
+    - Must be non-empty after trimming whitespace.
+    - If the exercise is an isometric hold, include the hold time in the name (e.g. "Plank, 60s hold", "L-sit, 20s hold").
+
+  sets (integer, REQUIRED)
+    - Number of sets to perform.
+    - Must be a positive integer (>= 1).
+    - Typical range: 2 to 5.
+
+  reps (integer, REQUIRED)
+    - Target reps PER SET. The same target applies to every set of this exercise.
+    - Must be an integer >= 0.
+    - Use 0 ONLY for isometric holds (where reps are not meaningful). For holds, the duration belongs in the name (see above).
+    - Otherwise use a positive integer (e.g. 8, 12, 20).
+
+  weight (number, REQUIRED)
+    - Weighted-vest load in POUNDS (lbs). NOT kilograms.
+    - Must be a number >= 0. Half-pounds are allowed (e.g. 17.5).
+    - Use 0 if no vest is worn for that exercise.
+    - This field is for VEST WEIGHT ONLY. The app is designed for bodyweight + weighted-vest training.
+    - Do NOT use this field to represent dumbbells, barbells, kettlebells, plates, bands, or anything other than a worn vest.
+
+==============================================================
+CONTENT RULES
+==============================================================
+
+  - Calisthenics ONLY. Every exercise must be a bodyweight movement, optionally loaded with a weighted vest.
+  - Allowed movement categories: push-ups and variants, pull-ups, chin-ups, muscle-ups, dips, inverted/bodyweight rows, bodyweight squats, lunges, split squats, pistol squats, step-ups, bodyweight hip thrusts and glute bridges, L-sits, planks, hollow holds, hanging leg raises, knee raises, mountain climbers, burpees, jump squats and plyometric variations, handstand holds and handstand push-ups, calf raises, bridges, dragon flags, archer and one-arm variations.
+  - Disallowed: barbells, dumbbells, kettlebells, cable machines, resistance machines, medicine balls, sleds, sandbags, resistance bands as the primary load. The vest is the ONLY external load.
+  - If a movement is conventionally loaded with external weight (e.g. "Goblet squat", "DB row"), substitute a bodyweight or vested variant (e.g. "Pistol squat", "Inverted row, vested").
+
+==============================================================
+JSON FORMAT RULES (STRICT)
+==============================================================
+
+  - Output must be parseable by JavaScript's JSON.parse() with no preprocessing.
+  - Do NOT wrap the output in \`\`\`json ... \`\`\` code fences.
+  - Do NOT include any prose before or after the JSON.
+  - Do NOT include trailing commas.
+  - Do NOT include comments (JSON does not support comments).
+  - Use double quotes for all strings and field names. No single quotes.
+  - All numeric values are JSON numbers — never quoted.
+  - Do NOT add any fields that aren't in the schema above. Unknown fields will be ignored.
+  - Field order does not matter, but every required field must be present on every object.
+
+==============================================================
+EXAMPLES (valid output)
+==============================================================
+
+Minimal valid output (one exercise, no vest):
 {
-  "name": "<workout name>",
+  "name": "Quick Pull",
   "exercises": [
-    {
-      "name": "<exercise name>",
-      "sets": <integer, number of sets>,
-      "reps": <integer, target reps per set>,
-      "weight": <number, weighted-vest load in lbs; use 0 if no vest>
-    }
+    {"name": "Pull-ups", "sets": 3, "reps": 8, "weight": 0}
   ]
 }
 
-Example output:
+Mixed bodyweight + vested workout:
 {
-  "name": "Push Day",
+  "name": "Push Day, Vested",
   "exercises": [
-    {"name": "Push-ups", "sets": 3, "reps": 12, "weight": 0},
+    {"name": "Push-ups", "sets": 4, "reps": 15, "weight": 20},
     {"name": "Dips", "sets": 3, "reps": 8, "weight": 20},
-    {"name": "Pike push-ups", "sets": 3, "reps": 8, "weight": 0}
+    {"name": "Pike push-ups", "sets": 3, "reps": 8, "weight": 0},
+    {"name": "Plank, 60s hold", "sets": 3, "reps": 0, "weight": 20}
   ]
 }
 
-Rules:
-- Calisthenics only: bodyweight movements, optionally loaded with a weighted vest. No barbells, dumbbells, kettlebells, cables, or machines.
-- Pull-ups, dips, push-ups, rows, squats, lunges, pistol squats, L-sits, hollow holds, etc. are fine. Use vest weight on movements where it makes sense.
-- Output JSON only. Do not wrap in \`\`\`json fences.
+Full-body session with holds and plyometrics:
+{
+  "name": "Full Body A",
+  "exercises": [
+    {"name": "Pull-ups", "sets": 4, "reps": 6, "weight": 20},
+    {"name": "Push-ups", "sets": 4, "reps": 20, "weight": 20},
+    {"name": "Bulgarian split squats (per leg)", "sets": 3, "reps": 10, "weight": 0},
+    {"name": "Inverted rows", "sets": 3, "reps": 12, "weight": 20},
+    {"name": "Hollow hold, 30s hold", "sets": 3, "reps": 0, "weight": 0},
+    {"name": "Burpees", "sets": 2, "reps": 15, "weight": 0}
+  ]
+}
 
-Now build the workout. Here is what I want:
-[REPLACE THIS LINE with what you want — e.g. "30-min push day, intermediate level, with 20lb vest where appropriate"]`;
+==============================================================
+YOUR TASK
+==============================================================
+
+Generate the workout described below. Respond with the JSON object ONLY, exactly matching the schema and rules above.
+
+REQUEST:
+[REPLACE THIS LINE with what you want. Examples of useful detail to include: total duration, focus area (push / pull / legs / full body / conditioning), available vest weight in lbs, difficulty level, any movements to avoid (injuries, equipment access), preferred rep ranges.]`;
 
 async function copyChatGPTPrompt() {
   try {
