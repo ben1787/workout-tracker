@@ -111,18 +111,31 @@ function requirePositiveNumber(v, where, field) {
 }
 
 function normalizeJsonText(text) {
-  // iOS keyboards and chat apps often substitute smart quotes and NBSP, which JSON.parse rejects.
+  // iOS / chat apps substitute smart quotes and NBSP that JSON.parse rejects.
+  // Explicit \u escapes so the source bytes can't be mangled by any encoding layer.
   return text
-    .replace(/[“”„‟″‶]/g, '"')
-    .replace(/[‘’‚‛′‵]/g, "'")
-    .replace(/[   ]/g, ' ')
-    .replace(/[–—]/g, '-');
+    .replace(/[\u201C\u201D\u201E\u201F\u2033\u2036\u00AB\u00BB]/g, '"')
+    .replace(/[\u2018\u2019\u201A\u201B\u2032\u2035]/g, "'")
+    .replace(/[\u00A0\u202F\u2007\u200A\u200B\u3000\u2028\u2029]/g, ' ')
+    .replace(/[\u2013\u2014\u2212]/g, '-')
+    .replace(/\u2026/g, '...');
 }
 
 function parsePlan(text) {
+  const normalized = normalizeJsonText(text);
   let data;
-  try { data = JSON.parse(normalizeJsonText(text)); }
-  catch (e) { throw new Error(`Invalid JSON: ${e.message}`); }
+  try { data = JSON.parse(normalized); }
+  catch (e) {
+    const m = /position (\d+)/.exec(e.message);
+    if (m) {
+      const pos = Number(m[1]);
+      const ch = normalized.charAt(pos);
+      const code = normalized.charCodeAt(pos).toString(16).toUpperCase().padStart(4, '0');
+      const ctx = normalized.slice(Math.max(0, pos - 25), pos) + '⟦' + ch + '⟧' + normalized.slice(pos + 1, pos + 25);
+      throw new Error(`Invalid JSON at position ${pos}: U+${code} (${ch === '\n' ? '\\n' : ch}).\n${ctx}`);
+    }
+    throw new Error(`Invalid JSON: ${e.message}`);
+  }
   if (!data || typeof data !== 'object') throw new Error('Top-level must be a JSON object.');
 
   const name = requireString(data.program_name ?? data.name, 'plan', 'program_name');
