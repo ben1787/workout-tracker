@@ -930,10 +930,9 @@ FULL VALID EXAMPLE
 YOUR TASK
 ==============================================================
 
-Generate a plan that satisfies the request below. Respond with the JSON object ONLY.
+Now produce the JSON for the plan/workout we've been discussing in this conversation. If we haven't yet pinned down a specific plan, ask me what I want first; otherwise just output the JSON.
 
-REQUEST:
-[REPLACE THIS LINE. Useful detail to include: total weeks, goal (Murph prep / strength / conditioning / hybrid), available vest weight in lbs, current ability level, days/week, any movements to avoid, preferred session length.]`;
+Respond with the JSON object ONLY — no commentary, no markdown fences, no explanation. Just the raw JSON.`;
 
 async function copyChatGPTPrompt() {
   try {
