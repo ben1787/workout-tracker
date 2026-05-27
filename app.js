@@ -84,8 +84,21 @@ function toast(msg) {
 // Parser
 // ============================================================
 
-const VALID_DAY_TYPES = ['workout', 'cardio', 'rest'];
-const VALID_SECTION_TYPES = ['exercise', 'circuit', 'cardio', 'mobility'];
+const VALID_DAY_TYPES = ['workout', 'cardio', 'mobility', 'rest'];
+const VALID_SECTION_TYPES = ['exercise', 'circuit', 'cardio', 'warmup', 'cooldown', 'mobility'];
+const TIMER_SECTION_TYPES = ['cardio', 'mobility', 'warmup', 'cooldown'];
+
+// Helpers that treat 0 / null / undefined as "field not present" — matches the
+// schema convention of "use 0 for numeric fields that do not apply".
+function posOrNull(v) {
+  const n = Number(v);
+  return Number.isFinite(n) && n > 0 ? n : null;
+}
+function nonNegOrZero(v) {
+  if (v == null || v === '') return 0;
+  const n = Number(v);
+  return Number.isFinite(n) && n >= 0 ? n : 0;
+}
 
 function requireString(v, where, field) {
   if (typeof v !== 'string' || !v.trim()) throw new Error(`${where}: "${field}" must be a non-empty string.`);
@@ -96,11 +109,6 @@ function requirePositiveNumber(v, where, field) {
   if (!Number.isFinite(n) || n <= 0) throw new Error(`${where}: "${field}" must be a positive number.`);
   return n;
 }
-function requireNonNegativeNumber(v, where, field) {
-  const n = Number(v);
-  if (!Number.isFinite(n) || n < 0) throw new Error(`${where}: "${field}" must be a non-negative number.`);
-  return n;
-}
 
 function parsePlan(text) {
   let data;
@@ -108,7 +116,7 @@ function parsePlan(text) {
   catch (e) { throw new Error(`Invalid JSON: ${e.message}`); }
   if (!data || typeof data !== 'object') throw new Error('Top-level must be a JSON object.');
 
-  const name = requireString(data.name, 'plan', 'name');
+  const name = requireString(data.program_name ?? data.name, 'plan', 'program_name');
   const duration_weeks = requirePositiveNumber(data.duration_weeks, 'plan', 'duration_weeks');
 
   if (!Array.isArray(data.days) || data.days.length === 0) {
@@ -124,7 +132,7 @@ function parseDay(day, idx) {
   if (!day || typeof day !== 'object') throw new Error(`${where}: not an object.`);
   const dayNum = Number(day.day);
   if (!Number.isFinite(dayNum)) throw new Error(`${where}: "day" must be a number.`);
-  const name = requireString(day.name, where, 'name');
+  const name = requireString(day.day_name ?? day.name, where, 'day_name');
   if (!VALID_DAY_TYPES.includes(day.type)) throw new Error(`${where} (${name}): "type" must be one of ${VALID_DAY_TYPES.join('|')}.`);
   const notes = typeof day.notes === 'string' ? day.notes : '';
 
@@ -142,45 +150,53 @@ function parseDay(day, idx) {
 function parseSection(s, di, si) {
   const where = `Day ${di + 1} section ${si + 1}`;
   if (!s || typeof s !== 'object') throw new Error(`${where}: not an object.`);
-  const name = requireString(s.name, where, 'name');
+  const name = requireString(s.section_name ?? s.name, where, 'section_name');
   if (!VALID_SECTION_TYPES.includes(s.type)) {
     throw new Error(`${where} (${name}): "type" must be one of ${VALID_SECTION_TYPES.join('|')}.`);
   }
   const out = { name, type: s.type };
 
   if (s.type === 'circuit') {
-    out.rounds = requirePositiveNumber(s.rounds, `${where} (${name})`, 'rounds');
-    if (s.interval_seconds != null) {
-      out.interval_seconds = requirePositiveNumber(s.interval_seconds, `${where} (${name})`, 'interval_seconds');
-    }
+    const rounds = posOrNull(s.rounds);
+    if (!rounds) throw new Error(`${where} (${name}): circuit needs "rounds" > 0.`);
+    out.rounds = rounds;
+    const iv = posOrNull(s.interval_seconds);
+    if (iv) out.interval_seconds = iv;
     if (!Array.isArray(s.exercises) || s.exercises.length === 0) {
       throw new Error(`${where} (${name}): circuit needs non-empty "exercises" array.`);
     }
-    out.exercises = s.exercises.map((ex, ei) => {
-      const w = `${where} (${name}) exercise ${ei + 1}`;
-      if (!ex || typeof ex !== 'object') throw new Error(`${w}: not an object.`);
-      return {
-        name: requireString(ex.name, w, 'name'),
-        reps: requireNonNegativeNumber(ex.reps, w, 'reps'),
-        weight: ex.weight == null ? 0 : requireNonNegativeNumber(ex.weight, w, 'weight'),
-      };
-    });
+    out.exercises = s.exercises.map((ex, ei) => parseExerciseEntry(ex, `${where} (${name}) exercise ${ei + 1}`));
   } else if (s.type === 'exercise') {
-    out.sets = requirePositiveNumber(s.sets, `${where} (${name})`, 'sets');
-    out.reps = requireNonNegativeNumber(s.reps, `${where} (${name})`, 'reps');
-    out.weight = s.weight == null ? 0 : requireNonNegativeNumber(s.weight, `${where} (${name})`, 'weight');
-  } else if (s.type === 'cardio' || s.type === 'mobility') {
-    if (s.duration_minutes != null) out.duration_minutes = requirePositiveNumber(s.duration_minutes, `${where} (${name})`, 'duration_minutes');
-    if (s.distance_miles != null) out.distance_miles = requirePositiveNumber(s.distance_miles, `${where} (${name})`, 'distance_miles');
-    if (s.target_intensity != null) {
-      if (typeof s.target_intensity !== 'string') throw new Error(`${where} (${name}): "target_intensity" must be a string.`);
-      out.target_intensity = s.target_intensity;
+    const sets = posOrNull(s.sets);
+    if (!sets) throw new Error(`${where} (${name}): exercise section needs "sets" > 0.`);
+    out.sets = sets;
+    if (!Array.isArray(s.exercises) || s.exercises.length === 0) {
+      throw new Error(`${where} (${name}): exercise section needs "exercises" with at least one entry.`);
     }
-    if (out.duration_minutes == null && out.distance_miles == null) {
-      throw new Error(`${where} (${name}): cardio/mobility section needs duration_minutes or distance_miles.`);
+    // Use the first exercise entry; extras are ignored. Use circuit type for multi-exercise blocks.
+    const first = parseExerciseEntry(s.exercises[0], `${where} (${name}) exercise 1`);
+    out.exerciseName = first.name;
+    out.reps = first.reps;
+    out.weight = first.weight;
+  } else if (TIMER_SECTION_TYPES.includes(s.type)) {
+    const dm = posOrNull(s.duration_minutes);
+    if (dm) out.duration_minutes = dm;
+    const dist = posOrNull(s.distance_miles);
+    if (dist) out.distance_miles = dist;
+    if (typeof s.target_intensity === 'string' && s.target_intensity.trim()) {
+      out.target_intensity = s.target_intensity.trim();
     }
+    // No required positive numeric — section becomes a freeform timer if nothing given.
   }
   return out;
+}
+
+function parseExerciseEntry(ex, where) {
+  if (!ex || typeof ex !== 'object') throw new Error(`${where}: not an object.`);
+  const name = requireString(ex.name, where, 'name');
+  const reps = nonNegOrZero(ex.reps);
+  const weight = nonNegOrZero(ex.weight);
+  return { name, reps, weight };
 }
 
 // ============================================================
@@ -197,7 +213,7 @@ function buildActive(plan, dayIdx) {
     } else if (s.type === 'exercise') {
       base.completedSets = []; // [{reps, weight, startedAt, endedAt}]
       base.currentSetStartedAt = null;
-    } else if (s.type === 'cardio' || s.type === 'mobility') {
+    } else if (TIMER_SECTION_TYPES.includes(s.type)) {
       base.timerStartedAt = null;
       base.timerEndedAt = null;
       base.actualMinutes = null;
@@ -224,7 +240,7 @@ function isSectionComplete(sec) {
   if (sec.completed) return true;
   if (sec.type === 'circuit') return sec.completedRounds.length >= sec.rounds;
   if (sec.type === 'exercise') return sec.completedSets.length >= sec.sets;
-  if (sec.type === 'cardio' || sec.type === 'mobility') return sec.timerEndedAt != null;
+  if (TIMER_SECTION_TYPES.includes(sec.type)) return sec.timerEndedAt != null;
   return false;
 }
 
@@ -395,7 +411,7 @@ const views = {
       } else if (isCurrent) {
         if (sec.type === 'circuit') renderCircuit(card, sec, si);
         else if (sec.type === 'exercise') renderExercise(card, sec, si);
-        else if (sec.type === 'cardio' || sec.type === 'mobility') renderCardio(card, sec, si);
+        else if (TIMER_SECTION_TYPES.includes(sec.type)) renderCardio(card, sec, si);
       } else {
         card.appendChild(el('div', { class: 'muted' }, 'Up next'));
       }
@@ -489,7 +505,7 @@ const views = {
           ]));
         });
         card.appendChild(list);
-      } else if (sec.type === 'cardio' || sec.type === 'mobility') {
+      } else if (TIMER_SECTION_TYPES.includes(sec.type)) {
         const dm = sec.timerEndedAt && sec.timerStartedAt ? sec.timerEndedAt - sec.timerStartedAt : null;
         card.appendChild(el('div', { class: 'col' }, [
           el('div', { class: 'muted' }, `Elapsed: ${fmtDuration(dm)}`),
@@ -518,13 +534,15 @@ function sectionSummary(s) {
     return `${s.rounds} rounds${iv}: ${exs}`;
   }
   if (s.type === 'exercise') {
-    return `${s.sets} × ${s.reps}${s.weight ? ` @${s.weight}lb` : ''}`;
+    const ex = s.exerciseName ? `${s.exerciseName} — ` : '';
+    return `${ex}${s.sets} × ${s.reps}${s.weight ? ` @${s.weight}lb` : ''}`;
   }
-  if (s.type === 'cardio' || s.type === 'mobility') {
+  if (TIMER_SECTION_TYPES.includes(s.type)) {
     const parts = [];
     if (s.duration_minutes != null) parts.push(`${s.duration_minutes} min`);
     if (s.distance_miles != null) parts.push(`${s.distance_miles} mi`);
     if (s.target_intensity) parts.push(s.target_intensity);
+    if (parts.length === 0) parts.push('freeform timer');
     return parts.join(' · ');
   }
   return '';
@@ -621,8 +639,9 @@ function renderCardio(card, sec, si) {
     return;
   }
 
+  const label = { cardio: 'Cardio', mobility: 'Mobility', warmup: 'Warm-up', cooldown: 'Cool-down' }[sec.type] || 'Timer';
   const timerNode = el('div', { class: 'big-stat' }, [
-    el('div', { class: 'big-stat-label' }, sec.type === 'mobility' ? 'Mobility' : 'Cardio'),
+    el('div', { class: 'big-stat-label' }, label),
     el('div', { class: 'big-stat-value timer', id: `cardio-${si}` }, '0:00'),
   ]);
   card.appendChild(timerNode);
@@ -713,226 +732,59 @@ function stopAllTickers() {
 // Actions
 // ============================================================
 
-const CHATGPT_PROMPT = `You are generating a multi-week calisthenics training plan for a tracker app. Your output MUST be a single valid JSON object that conforms exactly to the schema below. Output NOTHING ELSE — no commentary, no markdown code fences, no explanation, no leading or trailing text.
+const CHATGPT_PROMPT = `You are generating a calisthenics training program for a workout tracker app.
 
-==============================================================
-TOP-LEVEL SCHEMA
-==============================================================
+Output MUST be a single valid JSON object and nothing else. No markdown, no explanation, no comments, no trailing commas.
 
-{
-  "name": <string, REQUIRED>,
-  "duration_weeks": <integer, REQUIRED, >= 1>,
-  "days": [ <Day>, <Day>, ... ]   // REQUIRED, non-empty, ordered
-}
-
-  name                Human-readable plan name. Non-empty.
-  duration_weeks      How many weeks the plan runs. The "days" array is a weekly template that repeats for this many weeks.
-  days                Ordered weekly template. Typically 7 entries, one per weekday, but the count is up to you.
-
-==============================================================
-Day SCHEMA
-==============================================================
+The JSON must follow this exact structure:
 
 {
-  "day": <integer, REQUIRED>,           // 1-based position in the week (1..7 typically)
-  "name": <string, REQUIRED>,           // Human-readable day name, e.g. "Hard Murph Day", "Rest"
-  "type": <"workout" | "cardio" | "rest">,   // REQUIRED
-  "notes": <string, OPTIONAL>,          // Coaching cues, pacing, intent. Empty string allowed.
-  "sections": [ <Section>, ... ]        // REQUIRED if type != "rest". Omit or empty if type == "rest".
-}
-
-  type:
-    "workout"  — strength, circuits, or mixed work. Must have sections.
-    "cardio"   — purely cardio day (still uses sections, just cardio sections).
-    "rest"     — no work. sections is omitted or empty.
-
-==============================================================
-Section SCHEMA
-==============================================================
-
-A section is one block within a day. Day has one or more sections in the order performed.
-
-{
-  "name": <string, REQUIRED>,           // e.g. "Murph Rounds", "Run", "Core Circuit", "Pull-ups"
-  "type": <"exercise" | "circuit" | "cardio" | "mobility">,   // REQUIRED
-  ... type-specific fields below
-}
-
-== type == "exercise" ==
-Single exercise performed for sets × reps, with optional vest load.
-{
-  "name": "Pull-ups",
-  "type": "exercise",
-  "sets":   <integer, REQUIRED, >= 1>,
-  "reps":   <integer, REQUIRED, >= 0>,     // target reps per set; 0 only for isometric holds (encode hold time in name, e.g. "Plank, 60s hold")
-  "weight": <number, OPTIONAL, >= 0>       // vest weight in LBS. Default 0 if omitted. Half-lbs allowed.
-}
-
-== type == "circuit" ==
-Multiple exercises performed in a round, repeated for N rounds. Optionally interval-paced.
-{
-  "name": "Murph Rounds",
-  "type": "circuit",
-  "rounds":           <integer, REQUIRED, >= 1>,
-  "interval_seconds": <integer, OPTIONAL, > 0>,    // If set, user starts a new round every N seconds (EMOM-style pacing).
-  "exercises": [                                    // REQUIRED, non-empty, in round order
-    {
-      "name":   <string, REQUIRED>,
-      "reps":   <integer, REQUIRED, >= 0>,
-      "weight": <number, OPTIONAL, >= 0>            // vest lbs, default 0
-    },
-    ...
-  ]
-}
-
-== type == "cardio" or "mobility" ==
-A time- or distance-based block. Must include at least one of duration_minutes or distance_miles.
-{
-  "name": "Easy cardio",
-  "type": "cardio",                                  // or "mobility"
-  "duration_minutes": <number, OPTIONAL, > 0>,
-  "distance_miles":   <number, OPTIONAL, > 0>,
-  "target_intensity": <string, OPTIONAL>             // free-form: "zone_2", "moderate", "easy", "tempo", etc.
-}
-
-==============================================================
-CONTENT RULES
-==============================================================
-
-  - Calisthenics ONLY. Every strength exercise must be a bodyweight movement, optionally loaded with a weighted VEST.
-  - The "weight" field is VEST WEIGHT in pounds. Never use it for dumbbells, barbells, kettlebells, bands, sleds, etc. — those are not supported.
-  - Allowed strength movements: push-ups and variants, pull-ups, chin-ups, muscle-ups, dips, inverted/bodyweight rows, bodyweight squats, lunges, split squats, pistol squats, step-ups, glute bridges, hip thrusts (bodyweight), L-sits, planks, hollow holds, hanging leg raises, knee raises, mountain climbers, burpees, jump squats and plyo variations, handstand holds and push-ups, calf raises, bridges, dragon flags, archer / one-arm variations.
-  - Disallowed: barbells, dumbbells, kettlebells, cables, resistance machines, sandbags, sleds. (Vest is the only external load.)
-  - Cardio sections can be running, biking, rowing, rucking, etc. (no equipment constraint — just describe the activity in the section name and target_intensity).
-
-==============================================================
-JSON FORMAT RULES (STRICT)
-==============================================================
-
-  - Output must be parseable by JSON.parse() with no preprocessing.
-  - Do NOT wrap output in \`\`\`json ... \`\`\` fences.
-  - No prose before or after the JSON.
-  - No trailing commas. No comments. Double quotes only.
-  - All numbers are JSON numbers (unquoted).
-  - Do NOT add fields not listed in this schema.
-  - Field order does not matter, but every REQUIRED field must be present on every object.
-
-==============================================================
-FULL VALID EXAMPLE
-==============================================================
-
-{
-  "name": "4-Week Murph Conditioning Plan",
-  "duration_weeks": 4,
+  "program_name": string,
+  "duration_weeks": number,
   "days": [
     {
-      "day": 1,
-      "name": "Hard Murph Day",
-      "type": "workout",
-      "notes": "Push the pace. Only all-out Murph-style day of the week.",
+      "day": number,
+      "day_name": string,
+      "type": "workout" | "cardio" | "rest" | "mobility",
+      "notes": string,
       "sections": [
         {
-          "name": "Run",
-          "type": "cardio",
-          "distance_miles": 1,
-          "target_intensity": "moderate"
-        },
-        {
-          "name": "Murph Rounds",
-          "type": "circuit",
-          "rounds": 20,
+          "section_name": string,
+          "type": "exercise" | "circuit" | "cardio" | "warmup" | "cooldown" | "mobility",
+          "rounds": number,
+          "sets": number,
+          "duration_minutes": number,
+          "distance_miles": number,
+          "interval_seconds": number,
+          "target_intensity": string,
           "exercises": [
-            {"name": "Pull-ups",          "reps": 5,  "weight": 0},
-            {"name": "Push-ups",          "reps": 10, "weight": 0},
-            {"name": "Bodyweight squats", "reps": 15, "weight": 0}
-          ]
-        },
-        {
-          "name": "Run",
-          "type": "cardio",
-          "distance_miles": 1,
-          "target_intensity": "moderate"
-        }
-      ]
-    },
-    {
-      "day": 2,
-      "name": "Easy Zone 2",
-      "type": "cardio",
-      "notes": "Easy enough to hold a conversation.",
-      "sections": [
-        {"name": "Easy cardio", "type": "cardio", "duration_minutes": 40, "target_intensity": "zone_2"}
-      ]
-    },
-    {
-      "day": 3,
-      "name": "Controlled Murph Volume",
-      "type": "workout",
-      "notes": "Do not race. One round every 2:15.",
-      "sections": [
-        {
-          "name": "Controlled Murph Rounds",
-          "type": "circuit",
-          "rounds": 20,
-          "interval_seconds": 135,
-          "exercises": [
-            {"name": "Pull-ups",          "reps": 5,  "weight": 0},
-            {"name": "Push-ups",          "reps": 10, "weight": 0},
-            {"name": "Bodyweight squats", "reps": 15, "weight": 0}
+            {
+              "name": string,
+              "reps": number,
+              "weight": number
+            }
           ]
         }
       ]
-    },
-    {"day": 4, "name": "Rest / Mobility", "type": "rest", "notes": "Walk or stretch. No Murph."},
-    {
-      "day": 5,
-      "name": "Vest Stamina",
-      "type": "workout",
-      "notes": "Controlled pace.",
-      "sections": [
-        {
-          "name": "Vested Conditioning",
-          "type": "circuit",
-          "rounds": 20,
-          "interval_seconds": 120,
-          "exercises": [
-            {"name": "Pull-ups",          "reps": 4,  "weight": 20},
-            {"name": "Push-ups",          "reps": 8,  "weight": 20},
-            {"name": "Bodyweight squats", "reps": 12, "weight": 20}
-          ]
-        }
-      ]
-    },
-    {
-      "day": 6,
-      "name": "Zone 2 + Core",
-      "type": "workout",
-      "sections": [
-        {"name": "Easy cardio", "type": "cardio", "duration_minutes": 50, "target_intensity": "zone_2"},
-        {
-          "name": "Core Circuit",
-          "type": "circuit",
-          "rounds": 3,
-          "exercises": [
-            {"name": "Bicycle crunches",       "reps": 40, "weight": 0},
-            {"name": "Lying ankle touches",    "reps": 40, "weight": 0},
-            {"name": "Hollow hold, 40s hold",  "reps": 0,  "weight": 0},
-            {"name": "Dead bugs (per side)",   "reps": 10, "weight": 0}
-          ]
-        }
-      ]
-    },
-    {"day": 7, "name": "Rest", "type": "rest", "notes": "Full rest or walking only."}
+    }
   ]
 }
 
-==============================================================
-YOUR TASK
-==============================================================
+Rules:
+- Use "program_name" for the whole plan.
+- Use "day_name" for each day.
+- Use "section_name" for each part of the day.
+- For numeric fields that do not apply, use 0.
+- For text fields that do not apply, use "".
+- For rest days, use "sections": [].
+- "weight" means weighted vest load in pounds only. Use 0 if no vest.
+- Calisthenics only. No dumbbells, barbells, kettlebells, cables, machines, bands, sleds, or medicine balls.
+- Allowed movements include pull-ups, chin-ups, push-ups, dips, bodyweight rows, squats, lunges, split squats, step-ups, pistol squats, glute bridges, calf raises, planks, hollow holds, L-sits, hanging leg raises, knee raises, mountain climbers, burpees, jump squats, handstand holds, handstand push-ups, bridges, dragon flags, and archer/one-arm variations.
+- Cardio sections may include running, walking, elliptical, Peloton, rowing, or stairmaster.
+- If an exercise is a hold, put the duration in the name, like "Hollow hold, 40s hold", and set reps to 0.
 
-Now produce the JSON for the plan/workout we've been discussing in this conversation. If we haven't yet pinned down a specific plan, ask me what I want first; otherwise just output the JSON.
-
-Respond with the JSON object ONLY — no commentary, no markdown fences, no explanation. Just the raw JSON.`;
+Request:
+Create a [INSERT DURATION] calisthenics program for [INSERT GOAL]. Available vest weight: [INSERT WEIGHT] lbs. Include [INSERT PREFERENCES]. Avoid [INSERT LIMITATIONS].`;
 
 async function copyChatGPTPrompt() {
   try {
