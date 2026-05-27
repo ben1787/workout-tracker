@@ -262,7 +262,7 @@ function isSectionComplete(sec) {
   if (sec.completed) return true;
   if (sec.type === 'circuit') return sec.completedRounds.length >= sec.rounds;
   if (sec.type === 'exercise') return sec.completedSets.length >= sec.sets;
-  if (TIMER_SECTION_TYPES.includes(sec.type)) return sec.timerEndedAt != null;
+  if (TIMER_SECTION_TYPES.includes(sec.type)) return sec.completed === true;
   return false;
 }
 
