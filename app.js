@@ -110,9 +110,18 @@ function requirePositiveNumber(v, where, field) {
   return n;
 }
 
+function normalizeJsonText(text) {
+  // iOS keyboards and chat apps often substitute smart quotes and NBSP, which JSON.parse rejects.
+  return text
+    .replace(/[“”„‟″‶]/g, '"')
+    .replace(/[‘’‚‛′‵]/g, "'")
+    .replace(/[   ]/g, ' ')
+    .replace(/[–—]/g, '-');
+}
+
 function parsePlan(text) {
   let data;
-  try { data = JSON.parse(text); }
+  try { data = JSON.parse(normalizeJsonText(text)); }
   catch (e) { throw new Error(`Invalid JSON: ${e.message}`); }
   if (!data || typeof data !== 'object') throw new Error('Top-level must be a JSON object.');
 
