@@ -280,3 +280,47 @@ input:focus, textarea:focus {
   border-color: var(--accent);
   color: var(--accent);
 }
+
+.big-stat {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  padding: 14px 0 6px;
+}
+.big-stat-label {
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-dim);
+}
+.big-stat-value {
+  font-size: 44px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  font-variant-numeric: tabular-nums;
+  color: var(--accent);
+}
+
+.interval {
+  text-align: center;
+  font-size: 16px;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+  padding: 8px 12px;
+  border-radius: 10px;
+  background: var(--surface-2);
+}
+.interval.countdown { color: var(--text-dim); }
+.interval.overdue {
+  color: var(--warn);
+  background: rgba(251, 191, 36, 0.1);
+  animation: pulse 1s infinite;
+}
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.55; }
+}
+
+.done-section { opacity: 0.55; }
+

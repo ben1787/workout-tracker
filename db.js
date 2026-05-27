@@ -1,5 +1,5 @@
 const DB_NAME = 'workout-tracker';
-const DB_VERSION = 1;
+const DB_VERSION = 2;
 
 let dbPromise;
 
@@ -9,8 +9,10 @@ function openDB() {
     const req = indexedDB.open(DB_NAME, DB_VERSION);
     req.onupgradeneeded = (e) => {
       const db = e.target.result;
-      if (!db.objectStoreNames.contains('routines')) {
-        db.createObjectStore('routines', { keyPath: 'id' });
+      // v2: rename routines -> plans, keep workouts.
+      if (db.objectStoreNames.contains('routines')) db.deleteObjectStore('routines');
+      if (!db.objectStoreNames.contains('plans')) {
+        db.createObjectStore('plans', { keyPath: 'id' });
       }
       if (!db.objectStoreNames.contains('workouts')) {
         const store = db.createObjectStore('workouts', { keyPath: 'id' });
@@ -33,10 +35,10 @@ function run(storeName, mode, fn) {
   }));
 }
 
-export const saveRoutine = (r) => run('routines', 'readwrite', s => s.put(r));
-export const listRoutines = () => run('routines', 'readonly', s => s.getAll());
-export const getRoutine = (id) => run('routines', 'readonly', s => s.get(id));
-export const deleteRoutine = (id) => run('routines', 'readwrite', s => s.delete(id));
+export const savePlan = (p) => run('plans', 'readwrite', s => s.put(p));
+export const listPlans = () => run('plans', 'readonly', s => s.getAll());
+export const getPlan = (id) => run('plans', 'readonly', s => s.get(id));
+export const deletePlan = (id) => run('plans', 'readwrite', s => s.delete(id));
 
 export const saveWorkout = (w) => run('workouts', 'readwrite', s => s.put(w));
 export const getWorkout = (id) => run('workouts', 'readonly', s => s.get(id));
@@ -48,6 +50,6 @@ export async function listWorkouts() {
 }
 
 export async function exportAll() {
-  const [routines, workouts] = await Promise.all([listRoutines(), listWorkouts()]);
-  return { exportedAt: Date.now(), routines, workouts };
+  const [plans, workouts] = await Promise.all([listPlans(), listWorkouts()]);
+  return { exportedAt: Date.now(), plans, workouts };
 }
