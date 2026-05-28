@@ -662,18 +662,18 @@ function renderCardio(card, sec, si) {
   }
 
   const label = { cardio: 'Cardio', mobility: 'Mobility', warmup: 'Warm-up', cooldown: 'Cool-down' }[sec.type] || 'Timer';
-  const timerNode = el('div', { class: 'big-stat' }, [
+  const valueNode = el('div', { class: 'big-stat-value timer', id: `cardio-${si}` }, '0:00');
+  card.appendChild(el('div', { class: 'big-stat' }, [
     el('div', { class: 'big-stat-label' }, label),
-    el('div', { class: 'big-stat-value timer', id: `cardio-${si}` }, '0:00'),
-  ]);
-  card.appendChild(timerNode);
+    valueNode,
+  ]));
 
   if (inProgress) {
     startCardioTicker(si);
     card.appendChild(el('button', { class: 'primary', on: { click: () => stopCardio(si) } }, 'Stop'));
   } else if (done) {
     const elapsedMs = sec.timerEndedAt - sec.timerStartedAt;
-    document.getElementById(`cardio-${si}`).textContent = fmtDuration(elapsedMs);
+    valueNode.textContent = fmtDuration(elapsedMs);
 
     const minsIn = el('input', { type: 'number', inputmode: 'decimal', step: '0.1', placeholder: 'Actual minutes', value: sec.actualMinutes != null ? String(sec.actualMinutes) : String(Math.round(elapsedMs / 60000)) });
     const milesIn = el('input', { type: 'number', inputmode: 'decimal', step: '0.01', placeholder: 'Actual miles', value: sec.actualMiles != null ? String(sec.actualMiles) : '' });
