@@ -416,8 +416,15 @@ const views = {
 
     const allDone = a.sections.every(isSectionComplete);
     if (allDone) {
+      const notesTa = el('textarea', {
+        placeholder: 'Notes (optional): how did it feel? anything notable?',
+        style: 'min-height: 80px;',
+      });
+      notesTa.value = a.notes || '';
+      notesTa.addEventListener('input', () => { state.active.notes = notesTa.value; saveActive(); });
       root.appendChild(el('div', { class: 'card current' }, [
         el('div', { class: 'exercise-name' }, '🎉 Session complete'),
+        notesTa,
         el('button', { class: 'primary', on: { click: () => finishSession() } }, 'Finish session'),
       ]));
     }
@@ -494,12 +501,30 @@ const views = {
 
     if (w.day.notes) root.appendChild(el('div', { class: 'card' }, [el('div', { class: 'muted' }, w.day.notes)]));
 
+    // Last-time comparison banner
+    const prior = findPreviousSession(w);
+    if (prior) {
+      const priorDur = prior.endedAt - prior.startedAt;
+      const delta = (dur || 0) - priorDur;
+      const sign = delta > 0 ? '+' : '−';
+      const daysAgo = Math.max(1, Math.round((w.startedAt - prior.startedAt) / 86400000));
+      root.appendChild(el('div', { class: 'card' }, [
+        el('div', { class: 'muted' }, `Last time: ${daysAgo}d ago · ${fmtDuration(priorDur)} (${sign}${fmtDuration(Math.abs(delta))} ${delta > 0 ? 'slower' : 'faster'})`),
+      ]));
+    }
+
+    if (w.notes && w.notes.trim()) {
+      root.appendChild(el('div', { class: 'card' }, [
+        el('div', { class: 'muted', style: 'font-style: italic;' }, `"${w.notes.trim()}"`),
+      ]));
+    }
+
     if (w.day.type === 'rest') {
       root.appendChild(el('div', { class: 'card' }, [el('div', { class: 'muted' }, 'Rest day — marked complete.')]));
       return;
     }
 
-    for (const sec of (w.sections || [])) {
+    (w.sections || []).forEach((sec, secIdx) => {
       const card = el('div', { class: 'card' });
       card.appendChild(el('div', { class: 'spread' }, [
         el('div', { class: 'exercise-name' }, sec.name),
@@ -507,14 +532,26 @@ const views = {
       ]));
 
       if (sec.type === 'circuit') {
-        // Summary stats
-        const durations = sec.completedRounds.map(r => r.endedAt - r.startedAt);
-        const avg = durations.length ? durations.reduce((a, b) => a + b, 0) / durations.length : 0;
-        const fastest = durations.length ? Math.min(...durations) : 0;
-        const slowest = durations.length ? Math.max(...durations) : 0;
+        const stats = circuitStats(sec);
+        const avg = stats?.avg ?? 0;
+        const fastest = stats?.fastest ?? 0;
+        const slowest = stats?.slowest ?? 0;
         card.appendChild(el('div', { class: 'muted' },
           `${sec.completedRounds.length} / ${sec.rounds} rounds · avg ${fmtDuration(avg)} · fastest ${fmtDuration(fastest)} · slowest ${fmtDuration(slowest)}`,
         ));
+        // Per-section comparison vs last time
+        const priorSec = prior?.sections?.[secIdx];
+        if (priorSec && priorSec.type === 'circuit') {
+          const ps = circuitStats(priorSec);
+          if (ps) {
+            const avgDelta = avg - ps.avg;
+            const sign = avgDelta > 0 ? '+' : '−';
+            const word = avgDelta > 0 ? 'slower' : 'faster';
+            card.appendChild(el('div', { class: 'muted' },
+              `vs last: avg ${fmtDuration(ps.avg)} (${sign}${fmtDuration(Math.abs(avgDelta))} ${word})`,
+            ));
+          }
+        }
 
         // Per-round splits
         const rounds = el('div', { class: 'col' });
@@ -568,9 +605,30 @@ const views = {
         ]));
       }
       root.appendChild(card);
-    }
+    });
   },
 };
+
+function findPreviousSession(w) {
+  return state.workouts
+    .filter(x => x.id !== w.id
+      && x.planId === w.planId
+      && x.dayIndex === w.dayIndex
+      && x.startedAt < w.startedAt)
+    .sort((a, b) => b.startedAt - a.startedAt)[0] || null;
+}
+
+function circuitStats(sec) {
+  const durs = sec.completedRounds.map(r => r.endedAt - r.startedAt);
+  if (!durs.length) return null;
+  return {
+    avg: durs.reduce((a, b) => a + b, 0) / durs.length,
+    fastest: Math.min(...durs),
+    slowest: Math.max(...durs),
+    rounds: durs.length,
+    totalReps: sec.completedRounds.reduce((s, r) => s + r.exercises.reduce((a, e) => a + (e.reps || 0), 0), 0),
+  };
+}
 
 // ============================================================
 // Summaries
@@ -748,19 +806,61 @@ function startWorkoutTimer() {
   workoutTicker = setInterval(update, 1000);
 }
 
+// ============================================================
+// Audio (interval rollover beep)
+// ============================================================
+let audioCtx = null;
+function ensureAudioCtx() {
+  if (!audioCtx) {
+    try { audioCtx = new (window.AudioContext || window.webkitAudioContext)(); } catch {}
+  }
+  if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume().catch(() => {});
+  return audioCtx;
+}
+function playBeep(freq = 880, durationMs = 250) {
+  const ctx = ensureAudioCtx();
+  if (!ctx) return;
+  try {
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.type = 'sine';
+    osc.frequency.value = freq;
+    const now = ctx.currentTime;
+    gain.gain.setValueAtTime(0.0001, now);
+    gain.gain.exponentialRampToValueAtTime(0.3, now + 0.01);
+    gain.gain.exponentialRampToValueAtTime(0.0001, now + durationMs / 1000);
+    osc.connect(gain);
+    gain.connect(ctx.destination);
+    osc.start(now);
+    osc.stop(now + durationMs / 1000);
+  } catch {}
+}
+function buzz(ms = 200) { try { navigator.vibrate && navigator.vibrate(ms); } catch {} }
+
 const intervalTickers = new Map();
+const intervalLastState = new Map();
 function startIntervalTicker(si, nextTargetAt) {
   stopIntervalTicker(si);
   const update = () => {
     const node = document.getElementById(`interval-${si}`);
     if (!node) { stopIntervalTicker(si); return; }
+    const remaining = nextTargetAt - now();
+    const newState = remaining > 0 ? 'countdown' : 'overdue';
+    const prev = intervalLastState.get(si);
+    if (prev === 'countdown' && newState === 'overdue') {
+      playBeep(880, 300);
+      buzz(250);
+    }
+    intervalLastState.set(si, newState);
     updateIntervalDisplay(node, nextTargetAt);
   };
+  update();
   const t = setInterval(update, 250);
   intervalTickers.set(si, t);
 }
 function stopIntervalTicker(si) {
   if (intervalTickers.has(si)) { clearInterval(intervalTickers.get(si)); intervalTickers.delete(si); }
+  intervalLastState.delete(si);
 }
 function updateIntervalDisplay(node, targetAt) {
   const remaining = targetAt - now();
@@ -812,6 +912,7 @@ function stopAllTickers() {
   if (workoutTicker) { clearInterval(workoutTicker); workoutTicker = null; }
   for (const t of intervalTickers.values()) clearInterval(t);
   intervalTickers.clear();
+  intervalLastState.clear();
   for (const t of cardioTickers.values()) clearInterval(t);
   cardioTickers.clear();
   for (const t of roundTickers.values()) clearInterval(t);
@@ -924,6 +1025,7 @@ function startDay(plan, dayIdx) {
 }
 
 function startCircuitRound(si) {
+  ensureAudioCtx(); // unlock audio on user gesture so later interval beeps can play
   const sec = state.active.sections[si];
   sec.currentRoundStartedAt = now();
   saveActive();
