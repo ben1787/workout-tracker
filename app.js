@@ -424,10 +424,9 @@ const views = {
       el('button', { class: 'danger', on: { click: () => cancelSession() } }, 'Cancel'),
     ]));
 
-    if (a.day.notes) root.appendChild(el('div', { class: 'card' }, [el('div', { class: 'muted' }, a.day.notes)]));
-
     if (a.day.type === 'rest') {
-      root.appendChild(el('div', { class: 'card' }, [
+      if (a.day.notes) root.appendChild(el('div', { class: 'card' }, [el('div', { class: 'muted' }, a.day.notes)]));
+      root.appendChild(el('div', { class: 'card current' }, [
         el('div', { class: 'exercise-name' }, 'Rest day'),
         el('div', { class: 'muted' }, 'No work today. Mark complete when you\'re done resting (or skip entirely).'),
         el('button', { class: 'primary', on: { click: () => finishSession() } }, 'Mark rest day complete'),
@@ -451,6 +450,8 @@ const views = {
       ]));
     }
 
+    if (a.day.notes) root.appendChild(el('div', { class: 'card' }, [el('div', { class: 'muted' }, a.day.notes)]));
+
     a.sections.forEach((sec, si) => {
       const isCurrent = si === a.currentSectionIdx;
       const isDone = isSectionComplete(sec);
@@ -466,7 +467,10 @@ const views = {
 
       if (isDone) {
         card.classList.add('done-section');
-        card.appendChild(el('div', { class: 'muted' }, sec.skipped ? '⊘ skipped' : '✓ done'));
+        card.appendChild(el('div', { class: 'spread' }, [
+          el('div', { class: 'muted' }, sec.skipped ? '⊘ skipped' : '✓ done'),
+          el('button', { class: 'ghost', on: { click: () => redoSection(si) } }, '↺ Re-do'),
+        ]));
       } else if (isCurrent) {
         if (sec.type === 'circuit') renderCircuit(card, sec, si);
         else if (sec.type === 'exercise') renderExercise(card, sec, si);
@@ -481,6 +485,7 @@ const views = {
     });
 
     startWorkoutTimer();
+    maybeScrollToCurrent(root);
   },
 
   history(root) {
@@ -1015,6 +1020,23 @@ function stopRoundTicker(si) {
   if (roundTickers.has(si)) { clearInterval(roundTickers.get(si)); roundTickers.delete(si); }
 }
 
+let lastScrolledSectionIdx = -1;
+let lastScrolledSessionId = null;
+function maybeScrollToCurrent(root) {
+  const a = state.active;
+  if (!a) { lastScrolledSectionIdx = -1; lastScrolledSessionId = null; return; }
+  if (a.id !== lastScrolledSessionId) {
+    lastScrolledSessionId = a.id;
+    lastScrolledSectionIdx = -1;
+  }
+  if (a.currentSectionIdx === lastScrolledSectionIdx) return;
+  lastScrolledSectionIdx = a.currentSectionIdx;
+  const node = root.querySelector('.card.current');
+  if (node && lastScrolledSectionIdx > 0) {
+    requestAnimationFrame(() => node.scrollIntoView({ behavior: 'smooth', block: 'start' }));
+  }
+}
+
 function stopAllTickers() {
   if (workoutTicker) { clearInterval(workoutTicker); workoutTicker = null; }
   for (const t of intervalTickers.values()) clearInterval(t);
@@ -1192,6 +1214,28 @@ function finishCardio(si, minsVal, milesVal) {
   sec.completed = true;
   saveActive();
   maybeAdvanceSection(si);
+  render();
+}
+
+function redoSection(si) {
+  if (!confirm('Re-do this section? Logged reps/time for it will be cleared.')) return;
+  const sec = state.active.sections[si];
+  sec.completed = false;
+  sec.skipped = false;
+  if (sec.type === 'circuit') {
+    sec.completedRounds = [];
+    sec.currentRoundStartedAt = null;
+  } else if (sec.type === 'exercise') {
+    sec.completedSets = [];
+    sec.currentSetStartedAt = null;
+  } else if (TIMER_SECTION_TYPES.includes(sec.type)) {
+    sec.timerStartedAt = null;
+    sec.timerEndedAt = null;
+    sec.actualMinutes = null;
+    sec.actualMiles = null;
+  }
+  state.active.currentSectionIdx = si;
+  saveActive();
   render();
 }
 
