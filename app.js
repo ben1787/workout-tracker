@@ -363,6 +363,20 @@ const views = {
       ]),
     ]));
 
+    // Progress card
+    const planSessions = state.workouts.filter(w => w.planId === plan.id).sort((a, b) => a.startedAt - b.startedAt);
+    const totalSessions = plan.duration_weeks * plan.days.length;
+    const doneSessions = planSessions.length;
+    const pct = Math.min(100, Math.round((doneSessions / totalSessions) * 100));
+    const currentWeek = Math.min(plan.duration_weeks, Math.floor(doneSessions / plan.days.length) + 1);
+    root.appendChild(el('div', { class: 'card' }, [
+      el('div', { class: 'spread' }, [
+        el('div', { class: 'muted' }, `Week ${currentWeek} of ${plan.duration_weeks}`),
+        el('div', { class: 'muted mono' }, `${doneSessions} / ${totalSessions} · ${pct}%`),
+      ]),
+      el('div', { class: 'progress' }, [el('div', { class: 'progress-fill', style: `width: ${pct}%` })]),
+    ]));
+
     if (state.active && state.active.planId === plan.id) {
       root.appendChild(el('div', { class: 'card current tap', on: { click: () => go('session') } }, [
         el('div', { class: 'muted' }, 'In progress'),
@@ -371,15 +385,23 @@ const views = {
       ]));
     }
 
+    const suggestedIdx = suggestedNextDayIdx(plan);
+
     const list = el('div', { class: 'list' });
     plan.days.forEach((d, idx) => {
-      list.appendChild(el('div', { class: 'card tap', on: { click: () => startDay(plan, idx) } }, [
+      const isSuggested = idx === suggestedIdx && !(state.active && state.active.planId === plan.id);
+      const dayCount = planSessions.filter(s => s.dayIndex === idx).length;
+      list.appendChild(el('div', { class: 'card tap' + (isSuggested ? ' current' : ''), on: { click: () => startDay(plan, idx) } }, [
         el('div', { class: 'spread' }, [
           el('div', {}, [
             el('div', { class: 'exercise-name' }, `Day ${d.day}: ${d.name}`),
             el('div', { class: 'target' }, daySummary(d)),
           ]),
-          el('span', { class: 'pill' }, d.type),
+          el('div', { class: 'row tight', style: 'flex: 0;' }, [
+            isSuggested ? el('span', { class: 'pill accent' }, 'next') : null,
+            dayCount > 0 ? el('span', { class: 'pill' }, `${dayCount}×`) : null,
+            el('span', { class: 'pill' }, d.type),
+          ]),
         ]),
         d.notes ? el('div', { class: 'muted' }, d.notes) : null,
       ]));
@@ -444,11 +466,13 @@ const views = {
 
       if (isDone) {
         card.classList.add('done-section');
-        card.appendChild(el('div', { class: 'muted' }, '✓ done'));
+        card.appendChild(el('div', { class: 'muted' }, sec.skipped ? '⊘ skipped' : '✓ done'));
       } else if (isCurrent) {
         if (sec.type === 'circuit') renderCircuit(card, sec, si);
         else if (sec.type === 'exercise') renderExercise(card, sec, si);
         else if (TIMER_SECTION_TYPES.includes(sec.type)) renderCardio(card, sec, si);
+        // Skip-section escape hatch
+        card.appendChild(el('button', { class: 'ghost', on: { click: () => skipCurrentSection(si) } }, 'Skip this section'));
       } else {
         card.appendChild(el('div', { class: 'muted' }, 'Up next'));
       }
@@ -470,6 +494,17 @@ const views = {
       root.appendChild(el('div', { class: 'empty' }, 'No completed sessions yet.'));
       return;
     }
+
+    const stats = computeStats(state.workouts);
+    root.appendChild(el('div', { class: 'card' }, [
+      el('div', { class: 'muted' }, 'This week'),
+      el('div', { class: 'stats-row' }, [
+        el('div', { class: 'stat' }, [el('div', { class: 'stat-value' }, String(stats.weekSessions)), el('div', { class: 'stat-label' }, 'sessions')]),
+        el('div', { class: 'stat' }, [el('div', { class: 'stat-value' }, fmtDuration(stats.weekDuration)), el('div', { class: 'stat-label' }, 'time')]),
+        el('div', { class: 'stat' }, [el('div', { class: 'stat-value' }, String(stats.weekReps)), el('div', { class: 'stat-label' }, 'reps')]),
+        el('div', { class: 'stat' }, [el('div', { class: 'stat-value' }, String(stats.streak)), el('div', { class: 'stat-label' }, 'day streak')]),
+      ]),
+    ]));
 
     const list = el('div', { class: 'list' });
     for (const w of state.workouts) {
@@ -506,10 +541,13 @@ const views = {
     if (prior) {
       const priorDur = prior.endedAt - prior.startedAt;
       const delta = (dur || 0) - priorDur;
-      const sign = delta > 0 ? '+' : '−';
-      const daysAgo = Math.max(1, Math.round((w.startedAt - prior.startedAt) / 86400000));
+      const daysAgo = Math.round((w.startedAt - prior.startedAt) / 86400000);
+      const agoText = daysAgo < 1 ? 'earlier today' : daysAgo === 1 ? '1d ago' : `${daysAgo}d ago`;
+      const deltaText = Math.abs(delta) < 1000
+        ? '(same time)'
+        : `(${delta > 0 ? '+' : '−'}${fmtDuration(Math.abs(delta))} ${delta > 0 ? 'slower' : 'faster'})`;
       root.appendChild(el('div', { class: 'card' }, [
-        el('div', { class: 'muted' }, `Last time: ${daysAgo}d ago · ${fmtDuration(priorDur)} (${sign}${fmtDuration(Math.abs(delta))} ${delta > 0 ? 'slower' : 'faster'})`),
+        el('div', { class: 'muted' }, `Last time: ${agoText} · ${fmtDuration(priorDur)} ${deltaText}`),
       ]));
     }
 
@@ -543,13 +581,15 @@ const views = {
         const priorSec = prior?.sections?.[secIdx];
         if (priorSec && priorSec.type === 'circuit') {
           const ps = circuitStats(priorSec);
-          if (ps) {
+          if (ps && Math.abs(avg - ps.avg) >= 1000) {
             const avgDelta = avg - ps.avg;
             const sign = avgDelta > 0 ? '+' : '−';
             const word = avgDelta > 0 ? 'slower' : 'faster';
             card.appendChild(el('div', { class: 'muted' },
               `vs last: avg ${fmtDuration(ps.avg)} (${sign}${fmtDuration(Math.abs(avgDelta))} ${word})`,
             ));
+          } else if (ps) {
+            card.appendChild(el('div', { class: 'muted' }, `vs last: avg ${fmtDuration(ps.avg)} (same)`));
           }
         }
 
@@ -608,6 +648,47 @@ const views = {
     });
   },
 };
+
+function computeStats(workouts) {
+  const now = Date.now();
+  const weekAgo = now - 7 * 86400000;
+  const weekSessions = workouts.filter(w => w.startedAt >= weekAgo);
+  let weekDuration = 0, weekReps = 0;
+  for (const w of weekSessions) {
+    if (w.endedAt) weekDuration += w.endedAt - w.startedAt;
+    for (const sec of (w.sections || [])) {
+      if (sec.type === 'circuit') {
+        for (const r of (sec.completedRounds || [])) {
+          for (const ex of (r.exercises || [])) weekReps += ex.reps || 0;
+        }
+      } else if (sec.type === 'exercise') {
+        for (const s of (sec.completedSets || [])) weekReps += s.reps || 0;
+      }
+    }
+  }
+
+  // Streak: count consecutive days back from today/yesterday with at least one session.
+  const daySet = new Set();
+  for (const w of workouts) {
+    const d = new Date(w.startedAt);
+    daySet.add(`${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`);
+  }
+  let streak = 0;
+  for (let i = 0; i < 366; i++) {
+    const d = new Date(now - i * 86400000);
+    const key = `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`;
+    if (daySet.has(key)) streak++;
+    else if (i > 0) break; // allow today to not be done yet without breaking
+  }
+  return { weekSessions: weekSessions.length, weekDuration, weekReps, streak };
+}
+
+function suggestedNextDayIdx(plan) {
+  const sessions = state.workouts.filter(w => w.planId === plan.id).sort((a, b) => b.startedAt - a.startedAt);
+  if (sessions.length === 0) return 0;
+  const lastIdx = sessions[0].dayIndex;
+  return (lastIdx + 1) % plan.days.length;
+}
 
 function findPreviousSession(w) {
   return state.workouts
@@ -1082,6 +1163,16 @@ function finishCardio(si, minsVal, milesVal) {
   const sec = state.active.sections[si];
   sec.actualMinutes = minsVal === '' || minsVal == null ? null : Number(minsVal);
   sec.actualMiles = milesVal === '' || milesVal == null ? null : Number(milesVal);
+  sec.completed = true;
+  saveActive();
+  maybeAdvanceSection(si);
+  render();
+}
+
+function skipCurrentSection(si) {
+  if (!confirm('Skip this section? It will be marked as skipped in your history.')) return;
+  const sec = state.active.sections[si];
+  sec.skipped = true;
   sec.completed = true;
   saveActive();
   maybeAdvanceSection(si);
