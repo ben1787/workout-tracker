@@ -487,6 +487,7 @@ const views = {
     root.appendChild(el('div', { class: 'header' }, [
       el('button', { class: 'icon ghost', on: { click: () => go('home') } }, '← Back'),
       el('div', { class: 'title' }, [el('h1', {}, 'History')]),
+      el('button', { class: 'icon ghost', on: { click: () => importData() } }, 'Import'),
       el('button', { class: 'icon ghost', on: { click: () => exportData() } }, 'Export'),
     ]));
 
@@ -505,6 +506,20 @@ const views = {
         el('div', { class: 'stat' }, [el('div', { class: 'stat-value' }, String(stats.streak)), el('div', { class: 'stat-label' }, 'day streak')]),
       ]),
     ]));
+
+    if (stats.topExercises.length > 0) {
+      const exGrid = el('div', { class: 'ex-grid' });
+      for (const [name, reps] of stats.topExercises) {
+        exGrid.appendChild(el('div', { class: 'ex-tile' }, [
+          el('div', { class: 'stat-value' }, String(reps)),
+          el('div', { class: 'stat-label' }, name),
+        ]));
+      }
+      root.appendChild(el('div', { class: 'card' }, [
+        el('div', { class: 'muted' }, 'Volume by exercise'),
+        exGrid,
+      ]));
+    }
 
     const list = el('div', { class: 'list' });
     for (const w of state.workouts) {
@@ -654,18 +669,29 @@ function computeStats(workouts) {
   const weekAgo = now - 7 * 86400000;
   const weekSessions = workouts.filter(w => w.startedAt >= weekAgo);
   let weekDuration = 0, weekReps = 0;
+  const byExercise = {};
   for (const w of weekSessions) {
     if (w.endedAt) weekDuration += w.endedAt - w.startedAt;
     for (const sec of (w.sections || [])) {
       if (sec.type === 'circuit') {
         for (const r of (sec.completedRounds || [])) {
-          for (const ex of (r.exercises || [])) weekReps += ex.reps || 0;
+          for (const ex of (r.exercises || [])) {
+            const reps = ex.reps || 0;
+            weekReps += reps;
+            byExercise[ex.name] = (byExercise[ex.name] || 0) + reps;
+          }
         }
       } else if (sec.type === 'exercise') {
-        for (const s of (sec.completedSets || [])) weekReps += s.reps || 0;
+        const name = sec.exerciseName || sec.name;
+        for (const s of (sec.completedSets || [])) {
+          const reps = s.reps || 0;
+          weekReps += reps;
+          byExercise[name] = (byExercise[name] || 0) + reps;
+        }
       }
     }
   }
+  const topExercises = Object.entries(byExercise).sort((a, b) => b[1] - a[1]).slice(0, 6);
 
   // Streak: count consecutive days back from today/yesterday with at least one session.
   const daySet = new Set();
@@ -680,7 +706,7 @@ function computeStats(workouts) {
     if (daySet.has(key)) streak++;
     else if (i > 0) break; // allow today to not be done yet without breaking
   }
-  return { weekSessions: weekSessions.length, weekDuration, weekReps, streak };
+  return { weekSessions: weekSessions.length, weekDuration, weekReps, streak, topExercises };
 }
 
 function suggestedNextDayIdx(plan) {
@@ -1194,13 +1220,14 @@ async function finishSession() {
   const record = { ...a };
   delete record.currentSectionIdx;
   await db.saveWorkout(record);
+  const newId = record.id;
   state.workouts = await db.listWorkouts();
   state.active = null;
   saveActive();
   releaseWakeLock();
   stopAllTickers();
-  go('home');
-  toast('Session saved to history');
+  go('workoutDetail', { selectedWorkoutId: newId });
+  toast('Session saved');
 }
 
 function cancelSession() {
@@ -1217,6 +1244,31 @@ async function deleteHistoryEntry(w) {
   await db.deleteWorkout(w.id);
   state.workouts = await db.listWorkouts();
   go('history');
+}
+
+async function importData() {
+  const input = document.createElement('input');
+  input.type = 'file';
+  input.accept = 'application/json,.json';
+  input.onchange = async () => {
+    const file = input.files?.[0];
+    if (!file) return;
+    try {
+      const data = JSON.parse(await file.text());
+      if (!Array.isArray(data.plans) || !Array.isArray(data.workouts)) {
+        throw new Error('Backup needs "plans" and "workouts" arrays.');
+      }
+      for (const p of data.plans) await db.savePlan(p);
+      for (const w of data.workouts) await db.saveWorkout(w);
+      state.plans = await db.listPlans();
+      state.workouts = await db.listWorkouts();
+      toast(`Imported ${data.plans.length} plans · ${data.workouts.length} sessions`);
+      render();
+    } catch (e) {
+      alert('Import failed: ' + (e.message || e));
+    }
+  };
+  input.click();
 }
 
 async function exportData() {
