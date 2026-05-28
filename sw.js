@@ -1,4 +1,4 @@
-const VERSION = 'wt-v12';
+const VERSION = 'wt-v13';
 const ASSETS = [
   './',
   './index.html',

@@ -414,6 +414,14 @@ const views = {
       return;
     }
 
+    const allDone = a.sections.every(isSectionComplete);
+    if (allDone) {
+      root.appendChild(el('div', { class: 'card current' }, [
+        el('div', { class: 'exercise-name' }, '🎉 Session complete'),
+        el('button', { class: 'primary', on: { click: () => finishSession() } }, 'Finish session'),
+      ]));
+    }
+
     a.sections.forEach((sec, si) => {
       const isCurrent = si === a.currentSectionIdx;
       const isDone = isSectionComplete(sec);
@@ -499,20 +507,42 @@ const views = {
       ]));
 
       if (sec.type === 'circuit') {
-        card.appendChild(el('div', { class: 'muted' }, `${sec.completedRounds.length} / ${sec.rounds} rounds`));
+        // Summary stats
+        const durations = sec.completedRounds.map(r => r.endedAt - r.startedAt);
+        const avg = durations.length ? durations.reduce((a, b) => a + b, 0) / durations.length : 0;
+        const fastest = durations.length ? Math.min(...durations) : 0;
+        const slowest = durations.length ? Math.max(...durations) : 0;
+        card.appendChild(el('div', { class: 'muted' },
+          `${sec.completedRounds.length} / ${sec.rounds} rounds · avg ${fmtDuration(avg)} · fastest ${fmtDuration(fastest)} · slowest ${fmtDuration(slowest)}`,
+        ));
+
+        // Per-round splits
+        const rounds = el('div', { class: 'col' });
+        sec.completedRounds.forEach((r, i) => {
+          const dur = r.endedAt - r.startedAt;
+          const repsStr = r.exercises.map(e => `${e.reps} ${e.name}`).join(', ');
+          rounds.appendChild(el('div', { class: 'set-row done' }, [
+            el('div', { class: 'label' }, `${i + 1}`),
+            el('div', { class: 'mono', style: 'text-align:left; grid-column: span 2;' }, repsStr),
+            el('div', { class: 'pill' }, fmtDuration(dur)),
+          ]));
+        });
+        card.appendChild(rounds);
+
+        // Totals
         const totalsByEx = {};
         for (const r of sec.completedRounds) {
           for (const ex of r.exercises) {
             totalsByEx[ex.name] = (totalsByEx[ex.name] || 0) + (ex.reps || 0);
           }
         }
+        card.appendChild(el('div', { class: 'muted', style: 'margin-top: 6px;' }, 'Totals'));
         const totals = el('div', { class: 'col' });
         for (const [name, reps] of Object.entries(totalsByEx)) {
           totals.appendChild(el('div', { class: 'set-row done' }, [
             el('div', { class: 'label' }, '∑'),
-            el('div', { class: 'mono' }, name),
-            el('div', { class: 'mono' }, `${reps} reps`),
-            el('div', { class: 'pill' }, ''),
+            el('div', { class: 'mono', style: 'text-align:left; grid-column: span 2;' }, name),
+            el('div', { class: 'pill' }, `${reps} reps`),
           ]));
         }
         card.appendChild(totals);
@@ -529,10 +559,12 @@ const views = {
         card.appendChild(list);
       } else if (TIMER_SECTION_TYPES.includes(sec.type)) {
         const dm = sec.timerEndedAt && sec.timerStartedAt ? sec.timerEndedAt - sec.timerStartedAt : null;
+        const showLoggedMins = sec.actualMinutes != null && sec.actualMinutes > 0;
+        const showLoggedMiles = sec.actualMiles != null && sec.actualMiles > 0;
         card.appendChild(el('div', { class: 'col' }, [
           el('div', { class: 'muted' }, `Elapsed: ${fmtDuration(dm)}`),
-          sec.actualMinutes != null ? el('div', { class: 'muted' }, `Logged: ${sec.actualMinutes} min`) : null,
-          sec.actualMiles != null ? el('div', { class: 'muted' }, `Distance: ${sec.actualMiles} mi`) : null,
+          showLoggedMins ? el('div', { class: 'muted' }, `Logged: ${sec.actualMinutes} min`) : null,
+          showLoggedMiles ? el('div', { class: 'muted' }, `Distance: ${sec.actualMiles} mi`) : null,
         ]));
       }
       root.appendChild(card);
@@ -578,14 +610,31 @@ function renderCircuit(card, sec, si) {
   const roundIdx = sec.completedRounds.length; // next round to do (0-indexed)
   const totalRounds = sec.rounds;
   const inRound = sec.currentRoundStartedAt != null;
+  const displayRound = inRound ? roundIdx + 1 : Math.min(roundIdx + 1, totalRounds);
+
+  // Splits for completed rounds
+  if (sec.completedRounds.length > 0) {
+    const splits = el('div', { class: 'splits' });
+    sec.completedRounds.forEach((r, i) => {
+      splits.appendChild(el('span', { class: 'split-pill' }, [
+        el('span', { class: 'split-num' }, `${i + 1}`),
+        el('span', { class: 'split-time' }, fmtDuration(r.endedAt - r.startedAt)),
+      ]));
+    });
+    card.appendChild(splits);
+  }
 
   card.appendChild(el('div', { class: 'big-stat' }, [
     el('div', { class: 'big-stat-label' }, 'Round'),
-    el('div', { class: 'big-stat-value' }, `${roundIdx + (inRound ? 1 : (roundIdx < totalRounds ? 1 : totalRounds))} / ${totalRounds}`),
+    el('div', { class: 'big-stat-value' }, `${displayRound} / ${totalRounds}`),
   ]));
 
-  // Interval pacing display
-  if (sec.interval_seconds && sec.completedRounds.length > 0 && !inRound) {
+  if (inRound) {
+    // Live in-round timer
+    const liveNode = el('div', { class: 'interval countdown', id: `round-${si}` }, 'In round 0:00');
+    card.appendChild(liveNode);
+    startRoundTicker(si);
+  } else if (sec.interval_seconds && sec.completedRounds.length > 0) {
     const lastRoundStart = sec.completedRounds[sec.completedRounds.length - 1].startedAt;
     const nextTargetAt = lastRoundStart + sec.interval_seconds * 1000;
     const intervalNode = el('div', { class: 'interval', id: `interval-${si}` });
@@ -598,6 +647,7 @@ function renderCircuit(card, sec, si) {
   const repInputs = [];
   sec.exercises.forEach((ex) => {
     const repsIn = el('input', { type: 'number', inputmode: 'numeric', value: String(ex.reps), min: '0' });
+    if (!inRound) repsIn.disabled = true;
     repInputs.push({ ex, input: repsIn });
     exList.appendChild(el('div', { class: 'set-row' + (inRound ? ' active' : '') }, [
       el('div', { class: 'label mono' }, `${ex.reps}×`),
@@ -675,8 +725,8 @@ function renderCardio(card, sec, si) {
     const elapsedMs = sec.timerEndedAt - sec.timerStartedAt;
     valueNode.textContent = fmtDuration(elapsedMs);
 
-    const minsIn = el('input', { type: 'number', inputmode: 'decimal', step: '0.1', placeholder: 'Actual minutes', value: sec.actualMinutes != null ? String(sec.actualMinutes) : String(Math.round(elapsedMs / 60000)) });
-    const milesIn = el('input', { type: 'number', inputmode: 'decimal', step: '0.01', placeholder: 'Actual miles', value: sec.actualMiles != null ? String(sec.actualMiles) : '' });
+    const minsIn = el('input', { type: 'number', inputmode: 'decimal', step: '0.1', placeholder: 'Actual minutes', value: sec.actualMinutes != null ? String(sec.actualMinutes) : (elapsedMs / 60000).toFixed(1) });
+    const milesIn = el('input', { type: 'number', inputmode: 'decimal', step: '0.01', placeholder: sec.distance_miles ? `Actual miles (target ${sec.distance_miles})` : 'Actual miles', value: sec.actualMiles != null ? String(sec.actualMiles) : '' });
     card.appendChild(el('div', { class: 'row' }, [minsIn, milesIn]));
     card.appendChild(el('button', { class: 'primary', on: { click: () => finishCardio(si, minsIn.value, milesIn.value) } }, 'Save & continue'));
   }
@@ -742,12 +792,30 @@ function stopCardioTicker(si) {
   if (cardioTickers.has(si)) { clearInterval(cardioTickers.get(si)); cardioTickers.delete(si); }
 }
 
+const roundTickers = new Map();
+function startRoundTicker(si) {
+  stopRoundTicker(si);
+  const sec = state.active.sections[si];
+  const update = () => {
+    const node = document.getElementById(`round-${si}`);
+    if (!node || !sec.currentRoundStartedAt) { stopRoundTicker(si); return; }
+    node.textContent = `In round ${fmtDuration(now() - sec.currentRoundStartedAt)}`;
+  };
+  update();
+  roundTickers.set(si, setInterval(update, 1000));
+}
+function stopRoundTicker(si) {
+  if (roundTickers.has(si)) { clearInterval(roundTickers.get(si)); roundTickers.delete(si); }
+}
+
 function stopAllTickers() {
   if (workoutTicker) { clearInterval(workoutTicker); workoutTicker = null; }
   for (const t of intervalTickers.values()) clearInterval(t);
   intervalTickers.clear();
   for (const t of cardioTickers.values()) clearInterval(t);
   cardioTickers.clear();
+  for (const t of roundTickers.values()) clearInterval(t);
+  roundTickers.clear();
 }
 
 // ============================================================
@@ -970,22 +1038,6 @@ async function exportData() {
   a.remove();
   URL.revokeObjectURL(url);
 }
-
-// Detect "all sections complete" and surface Finish button as a floating action
-function renderFinishButton(root) {
-  const a = state.active;
-  if (!a || a.day.type === 'rest') return;
-  const allDone = a.sections.every(isSectionComplete);
-  if (!allDone) return;
-  root.appendChild(el('button', { class: 'primary', on: { click: () => finishSession() } }, 'Finish session'));
-}
-
-// Patch session view to include finish button at the bottom
-const _origSession = views.session;
-views.session = function(root) {
-  _origSession(root);
-  renderFinishButton(root);
-};
 
 // ============================================================
 // Init

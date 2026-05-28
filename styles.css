@@ -324,3 +324,28 @@ input:focus, textarea:focus {
 
 .done-section { opacity: 0.55; }
 
+.splits {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.split-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  padding: 4px 10px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+.split-num { color: var(--text-dim); font-weight: 600; }
+.split-time { color: var(--accent); }
+
+input:disabled {
+  opacity: 0.5;
+  -webkit-text-fill-color: var(--text-dim);
+  color: var(--text-dim);
+}
+
