@@ -295,6 +295,29 @@ const views = {
       el('button', { class: 'icon ghost', on: { click: () => go('history') } }, 'History'),
     ]));
 
+    // Backup reminder
+    const last = lastExportAt();
+    const daysSince = last ? Math.floor((Date.now() - last) / 86400000) : null;
+    const needsBackup = state.workouts.length > 0 && (last === null || daysSince >= 7);
+    if (needsBackup) {
+      root.appendChild(el('div', { class: 'card backup-card' }, [
+        el('div', { class: 'spread' }, [
+          el('div', {}, [
+            el('div', { class: 'exercise-name' }, last ? `Backup is ${daysSince}d old` : 'Back up your history'),
+            el('div', { class: 'muted' },
+              last
+                ? `Clearing Safari data would erase ${state.workouts.length} session${state.workouts.length === 1 ? '' : 's'}.`
+                : `${state.workouts.length} session${state.workouts.length === 1 ? '' : 's'} saved locally only. Download a backup file to keep them safe.`,
+            ),
+          ]),
+        ]),
+        el('div', { class: 'row' }, [
+          el('button', { class: 'primary', on: { click: () => exportData() } }, '⬇ Download backup'),
+          el('button', { class: 'ghost', on: { click: () => { localStorage.setItem(LAST_EXPORT_KEY, String(Date.now())); render(); } } }, 'Dismiss'),
+        ]),
+      ]));
+    }
+
     root.appendChild(el('button', { class: 'primary', on: { click: () => go('paste') } }, '+ Paste training plan'));
 
     if (state.active) {
@@ -1315,6 +1338,8 @@ async function importData() {
   input.click();
 }
 
+const LAST_EXPORT_KEY = 'wt.lastExport';
+
 async function exportData() {
   const data = await db.exportAll();
   const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
@@ -1326,6 +1351,24 @@ async function exportData() {
   a.click();
   a.remove();
   URL.revokeObjectURL(url);
+  localStorage.setItem(LAST_EXPORT_KEY, String(Date.now()));
+  toast('Backup downloaded');
+  render();
+}
+
+function lastExportAt() {
+  const v = Number(localStorage.getItem(LAST_EXPORT_KEY));
+  return Number.isFinite(v) && v > 0 ? v : null;
+}
+
+let persistedOk = null;
+async function requestPersistence() {
+  if (!navigator.storage || !navigator.storage.persist) return;
+  try {
+    const already = await navigator.storage.persisted();
+    if (already) { persistedOk = true; return; }
+    persistedOk = await navigator.storage.persist();
+  } catch { persistedOk = false; }
 }
 
 // ============================================================
@@ -1333,6 +1376,7 @@ async function exportData() {
 // ============================================================
 
 async function init() {
+  requestPersistence(); // best-effort; tells the browser not to evict our data
   state.plans = await db.listPlans();
   state.workouts = await db.listWorkouts();
   state.active = loadActive();

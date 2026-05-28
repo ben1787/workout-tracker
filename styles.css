@@ -391,6 +391,11 @@ input:disabled {
   border-color: var(--accent);
 }
 
+.backup-card {
+  background: linear-gradient(180deg, rgba(251, 191, 36, 0.08), transparent);
+  border-color: rgba(251, 191, 36, 0.3);
+}
+
 .ex-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(110px, 1fr));
