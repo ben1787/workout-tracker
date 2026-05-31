@@ -1188,7 +1188,13 @@ function completeCircuitRound(si, exercisesLog) {
   const sec = state.active.sections[si];
   const started = sec.currentRoundStartedAt || now();
   sec.completedRounds.push({ startedAt: started, endedAt: now(), exercises: exercisesLog });
-  sec.currentRoundStartedAt = null;
+  // Auto-start the next round unless the user is following an EMOM-style interval
+  // (where the "Start round" button is the whole point — they pace themselves to the cue).
+  if (!sec.interval_seconds && sec.completedRounds.length < sec.rounds) {
+    sec.currentRoundStartedAt = now();
+  } else {
+    sec.currentRoundStartedAt = null;
+  }
   saveActive();
   maybeAdvanceSection(si);
   render();
@@ -1210,7 +1216,12 @@ function completeExerciseSet(si, repsVal, weightVal) {
     startedAt: started,
     endedAt: now(),
   });
-  sec.currentSetStartedAt = null;
+  // Auto-start the next set — one "Done" tap per set, no separate "Start".
+  if (sec.completedSets.length < sec.sets) {
+    sec.currentSetStartedAt = now();
+  } else {
+    sec.currentSetStartedAt = null;
+  }
   saveActive();
   maybeAdvanceSection(si);
   render();
