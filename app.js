@@ -1188,9 +1188,10 @@ function completeCircuitRound(si, exercisesLog) {
   const sec = state.active.sections[si];
   const started = sec.currentRoundStartedAt || now();
   sec.completedRounds.push({ startedAt: started, endedAt: now(), exercises: exercisesLog });
-  // Auto-start the next round unless the user is following an EMOM-style interval
-  // (where the "Start round" button is the whole point — they pace themselves to the cue).
-  if (!sec.interval_seconds && sec.completedRounds.length < sec.rounds) {
+  // Always auto-start the next round so each round is one tap ('Round complete').
+  // Even with an EMOM-style interval, the user can use the on-screen target
+  // countdown to pace themselves without a separate Start tap.
+  if (sec.completedRounds.length < sec.rounds) {
     sec.currentRoundStartedAt = now();
   } else {
     sec.currentRoundStartedAt = null;
