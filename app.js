@@ -823,17 +823,10 @@ function renderCircuit(card, sec, si) {
   ]));
 
   if (inRound) {
-    // Live in-round timer
+    // Live in-round timer (includes budget countdown when interval_seconds is set)
     const liveNode = el('div', { class: 'interval countdown', id: `round-${si}` }, 'In round 0:00');
     card.appendChild(liveNode);
     startRoundTicker(si);
-  } else if (sec.interval_seconds && sec.completedRounds.length > 0) {
-    const lastRoundStart = sec.completedRounds[sec.completedRounds.length - 1].startedAt;
-    const nextTargetAt = lastRoundStart + sec.interval_seconds * 1000;
-    const intervalNode = el('div', { class: 'interval', id: `interval-${si}` });
-    card.appendChild(intervalNode);
-    updateIntervalDisplay(intervalNode, nextTargetAt);
-    startIntervalTicker(si, nextTargetAt);
   }
 
   const exList = el('div', { class: 'col' });
@@ -1028,19 +1021,40 @@ function stopCardioTicker(si) {
 }
 
 const roundTickers = new Map();
+const roundLastBudgetState = new Map();
 function startRoundTicker(si) {
   stopRoundTicker(si);
   const sec = state.active.sections[si];
   const update = () => {
     const node = document.getElementById(`round-${si}`);
     if (!node || !sec.currentRoundStartedAt) { stopRoundTicker(si); return; }
-    node.textContent = `In round ${fmtDuration(now() - sec.currentRoundStartedAt)}`;
+    const elapsed = now() - sec.currentRoundStartedAt;
+    let text = `In round ${fmtDuration(elapsed)}`;
+    if (sec.interval_seconds) {
+      const targetEnd = sec.currentRoundStartedAt + sec.interval_seconds * 1000;
+      const remaining = targetEnd - now();
+      const newState = remaining > 0 ? 'ok' : 'over';
+      const prev = roundLastBudgetState.get(si);
+      if (prev === 'ok' && newState === 'over') { playBeep(880, 300); buzz(250); }
+      roundLastBudgetState.set(si, newState);
+      if (remaining > 0) {
+        text += ` · ${fmtDuration(remaining)} left of ${fmtDuration(sec.interval_seconds * 1000)}`;
+        node.classList.remove('overdue');
+        node.classList.add('countdown');
+      } else {
+        text += ` · over by ${fmtDuration(-remaining)}`;
+        node.classList.add('overdue');
+        node.classList.remove('countdown');
+      }
+    }
+    node.textContent = text;
   };
   update();
-  roundTickers.set(si, setInterval(update, 1000));
+  roundTickers.set(si, setInterval(update, 250));
 }
 function stopRoundTicker(si) {
   if (roundTickers.has(si)) { clearInterval(roundTickers.get(si)); roundTickers.delete(si); }
+  roundLastBudgetState.delete(si);
 }
 
 let lastScrolledSectionIdx = -1;
@@ -1069,6 +1083,7 @@ function stopAllTickers() {
   cardioTickers.clear();
   for (const t of roundTickers.values()) clearInterval(t);
   roundTickers.clear();
+  roundLastBudgetState.clear();
 }
 
 // ============================================================
