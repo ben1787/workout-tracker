@@ -253,9 +253,15 @@ function buildActive(plan, dayIdx) {
     day: { day: day.day, name: day.name, type: day.type, notes: day.notes },
     sections,
     currentSectionIdx: 0,
-    startedAt: now(),
+    startedAt: null, // set on first user action (start round / start set / start timer / skip / finish)
     endedAt: null,
   };
+}
+
+function armSession() {
+  if (state.active && state.active.startedAt == null) {
+    state.active.startedAt = now();
+  }
 }
 
 function isSectionComplete(sec) {
@@ -928,6 +934,10 @@ function startWorkoutTimer() {
   const update = () => {
     const node = document.getElementById('wktimer');
     if (!node || !state.active) return;
+    if (state.active.startedAt == null) {
+      node.textContent = '0:00';
+      return;
+    }
     node.textContent = fmtDuration(now() - state.active.startedAt);
   };
   update();
@@ -1192,7 +1202,8 @@ function startDay(plan, dayIdx) {
 }
 
 function startCircuitRound(si) {
-  ensureAudioCtx(); // unlock audio on user gesture so later interval beeps can play
+  ensureAudioCtx();
+  armSession();
   const sec = state.active.sections[si];
   sec.currentRoundStartedAt = now();
   saveActive();
@@ -1217,6 +1228,7 @@ function completeCircuitRound(si, exercisesLog) {
 }
 
 function startExerciseSet(si) {
+  armSession();
   const sec = state.active.sections[si];
   sec.currentSetStartedAt = now();
   saveActive();
@@ -1244,6 +1256,7 @@ function completeExerciseSet(si, repsVal, weightVal) {
 }
 
 function startCardio(si) {
+  armSession();
   const sec = state.active.sections[si];
   sec.timerStartedAt = now();
   saveActive();
@@ -1291,6 +1304,7 @@ function redoSection(si) {
 
 function skipCurrentSection(si) {
   if (!confirm('Skip this section? It will be marked as skipped in your history.')) return;
+  armSession();
   const sec = state.active.sections[si];
   sec.skipped = true;
   sec.completed = true;
@@ -1310,6 +1324,7 @@ function maybeAdvanceSection(si) {
 
 async function finishSession() {
   const a = state.active;
+  if (a.startedAt == null) a.startedAt = now(); // rest day finished without ever arming
   a.endedAt = now();
   const record = { ...a };
   delete record.currentSectionIdx;
