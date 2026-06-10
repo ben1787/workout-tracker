@@ -494,6 +494,8 @@ const views = {
         el('span', { class: 'pill' }, sec.type),
       ]));
 
+      renderSectionHistoryChart(card, a.planId, a.dayIndex, si, sec);
+
       if (isDone) {
         card.classList.add('done-section');
         card.appendChild(el('div', { class: 'spread' }, [
@@ -750,6 +752,135 @@ function suggestedNextDayIdx(plan) {
   return (lastIdx + 1) % plan.days.length;
 }
 
+// ============================================================
+// Section history charts
+//
+// Philosophy: chart the free variable. If the prescription fixes the
+// work (rounds/reps/distance), the chart shows time to complete.
+// If the prescription fixes the time (duration_minutes), the chart
+// shows output (distance; reps/volume when an AMRAP type exists).
+// ============================================================
+
+function sectionMetricKind(sec) {
+  if (sec.type === 'circuit' || sec.type === 'exercise') return 'time';
+  if (TIMER_SECTION_TYPES.includes(sec.type)) {
+    if (sec.distance_miles != null && sec.duration_minutes == null) return 'time';
+    if (sec.duration_minutes != null) return 'distance';
+    return 'time'; // freeform timer
+  }
+  return null;
+}
+
+function sectionMetricValue(sec, kind) {
+  if (sec.skipped) return null;
+  if (sec.type === 'circuit') {
+    if (!sec.completedRounds || sec.completedRounds.length === 0) return null;
+    const first = sec.completedRounds[0];
+    const last = sec.completedRounds[sec.completedRounds.length - 1];
+    return last.endedAt - first.startedAt;
+  }
+  if (sec.type === 'exercise') {
+    if (!sec.completedSets || sec.completedSets.length === 0) return null;
+    const first = sec.completedSets[0];
+    const last = sec.completedSets[sec.completedSets.length - 1];
+    return last.endedAt - first.startedAt;
+  }
+  if (TIMER_SECTION_TYPES.includes(sec.type)) {
+    if (kind === 'distance') {
+      return sec.actualMiles != null && sec.actualMiles > 0 ? sec.actualMiles : null;
+    }
+    if (sec.timerStartedAt != null && sec.timerEndedAt != null) return sec.timerEndedAt - sec.timerStartedAt;
+    if (sec.actualMinutes != null && sec.actualMinutes > 0) return sec.actualMinutes * 60000;
+    return null;
+  }
+  return null;
+}
+
+function sectionHistory(planId, dayIndex, si, sec) {
+  const kind = sectionMetricKind(sec);
+  if (!kind) return { kind: null, entries: [] };
+  const sessions = state.workouts
+    .filter(w => w.planId === planId && w.dayIndex === dayIndex && w.endedAt)
+    .sort((a, b) => a.startedAt - b.startedAt);
+  const entries = [];
+  for (const w of sessions) {
+    let s = w.sections?.[si];
+    if (!s || s.name !== sec.name || s.type !== sec.type) {
+      s = (w.sections || []).find(x => x.name === sec.name && x.type === sec.type);
+    }
+    if (!s) continue;
+    const value = sectionMetricValue(s, kind);
+    if (value == null) continue;
+    entries.push({ when: w.startedAt, value });
+  }
+  return { kind, entries: entries.slice(-8) };
+}
+
+function fmtMetric(value, kind) {
+  if (kind === 'time') return fmtDuration(value);
+  if (kind === 'distance') return `${Number(value.toFixed(2))} mi`;
+  return String(value);
+}
+
+function buildSectionChartSVG(entries, kind) {
+  const W = 320, H = 84, padT = 14, padB = 13, gap = 6;
+  const n = entries.length;
+  const bw = Math.max(10, Math.min(44, (W - gap * (n - 1)) / n));
+  const max = Math.max(...entries.map(e => e.value));
+  const lowerIsBetter = kind === 'time';
+  const best = lowerIsBetter
+    ? Math.min(...entries.map(e => e.value))
+    : Math.max(...entries.map(e => e.value));
+  let out = '';
+  const mono = 'ui-monospace,Menlo,monospace';
+  entries.forEach((e, i) => {
+    const h = Math.max(3, (e.value / max) * (H - padT - padB));
+    const x = i * (bw + gap);
+    const y = H - padB - h;
+    const isLatest = i === n - 1;
+    const isBest = e.value === best;
+    const fill = isLatest ? 'var(--accent)' : isBest ? 'rgba(74,222,128,0.35)' : 'var(--surface-2)';
+    const stroke = isBest ? 'var(--accent)' : 'var(--border)';
+    out += `<rect x="${x.toFixed(1)}" y="${y.toFixed(1)}" width="${bw.toFixed(1)}" height="${h.toFixed(1)}" rx="4" fill="${fill}" stroke="${stroke}" stroke-width="1"/>`;
+    if (n <= 6 || isLatest) {
+      out += `<text x="${(x + bw / 2).toFixed(1)}" y="${(y - 3).toFixed(1)}" text-anchor="middle" font-size="9" fill="${isLatest ? 'var(--accent)' : 'var(--text-dim)'}" font-family="${mono}">${fmtMetric(e.value, kind)}</text>`;
+    }
+  });
+  const fd = (ts) => { const d = new Date(ts); return `${d.getMonth() + 1}/${d.getDate()}`; };
+  out += `<text x="0" y="${H - 2}" font-size="9" fill="var(--text-dim)" font-family="${mono}">${fd(entries[0].when)}</text>`;
+  if (n > 1) {
+    const totalW = bw * n + gap * (n - 1);
+    out += `<text x="${totalW.toFixed(1)}" y="${H - 2}" text-anchor="end" font-size="9" fill="var(--text-dim)" font-family="${mono}">${fd(entries[n - 1].when)}</text>`;
+  }
+  return `<svg viewBox="0 0 ${W} ${H}" width="100%" height="${H}" preserveAspectRatio="xMinYMid meet" xmlns="http://www.w3.org/2000/svg">${out}</svg>`;
+}
+
+function renderSectionHistoryChart(card, planId, dayIndex, si, sec) {
+  const { kind, entries } = sectionHistory(planId, dayIndex, si, sec);
+  if (!kind || entries.length === 0) return;
+
+  const header = [el('div', { class: 'chart-label' },
+    kind === 'time' ? 'Time to complete — history' : 'Distance covered — history')];
+
+  if (entries.length >= 2) {
+    const latest = entries[entries.length - 1].value;
+    const prev = entries[entries.length - 2].value;
+    const delta = latest - prev;
+    const lowerIsBetter = kind === 'time';
+    const improved = lowerIsBetter ? delta < 0 : delta > 0;
+    const same = kind === 'time' ? Math.abs(delta) < 1000 : Math.abs(delta) < 0.01;
+    const deltaStr = kind === 'time' ? fmtDuration(Math.abs(delta)) : `${Number(Math.abs(delta).toFixed(2))} mi`;
+    const word = kind === 'time' ? (delta < 0 ? 'faster' : 'slower') : (delta > 0 ? 'further' : 'less');
+    header.push(el('div', { class: 'chart-trend ' + (same ? '' : improved ? 'good' : 'bad') },
+      same ? 'same as last' : `${delta < 0 ? '−' : '+'}${deltaStr} ${word}`));
+  }
+
+  card.appendChild(el('div', { class: 'chart' }, [
+    el('div', { class: 'spread' }, header),
+    el('div', { html: buildSectionChartSVG(entries, kind) }),
+  ]));
+}
+
 function findPreviousSession(w) {
   return state.workouts
     .filter(x => x.id !== w.id
@@ -975,44 +1106,6 @@ function playBeep(freq = 880, durationMs = 250) {
 }
 function buzz(ms = 200) { try { navigator.vibrate && navigator.vibrate(ms); } catch {} }
 
-const intervalTickers = new Map();
-const intervalLastState = new Map();
-function startIntervalTicker(si, nextTargetAt) {
-  stopIntervalTicker(si);
-  const update = () => {
-    const node = document.getElementById(`interval-${si}`);
-    if (!node) { stopIntervalTicker(si); return; }
-    const remaining = nextTargetAt - now();
-    const newState = remaining > 0 ? 'countdown' : 'overdue';
-    const prev = intervalLastState.get(si);
-    if (prev === 'countdown' && newState === 'overdue') {
-      playBeep(880, 300);
-      buzz(250);
-    }
-    intervalLastState.set(si, newState);
-    updateIntervalDisplay(node, nextTargetAt);
-  };
-  update();
-  const t = setInterval(update, 250);
-  intervalTickers.set(si, t);
-}
-function stopIntervalTicker(si) {
-  if (intervalTickers.has(si)) { clearInterval(intervalTickers.get(si)); intervalTickers.delete(si); }
-  intervalLastState.delete(si);
-}
-function updateIntervalDisplay(node, targetAt) {
-  const remaining = targetAt - now();
-  if (remaining > 0) {
-    node.textContent = `Next round in ${fmtDuration(remaining)}`;
-    node.classList.remove('overdue');
-    node.classList.add('countdown');
-  } else {
-    node.textContent = `Behind by ${fmtDuration(-remaining)} — start now`;
-    node.classList.add('overdue');
-    node.classList.remove('countdown');
-  }
-}
-
 const cardioTickers = new Map();
 function startCardioTicker(si) {
   stopCardioTicker(si);
@@ -1086,9 +1179,6 @@ function maybeScrollToCurrent(root) {
 
 function stopAllTickers() {
   if (workoutTicker) { clearInterval(workoutTicker); workoutTicker = null; }
-  for (const t of intervalTickers.values()) clearInterval(t);
-  intervalTickers.clear();
-  intervalLastState.clear();
   for (const t of cardioTickers.values()) clearInterval(t);
   cardioTickers.clear();
   for (const t of roundTickers.values()) clearInterval(t);
@@ -1403,14 +1493,12 @@ function lastExportAt() {
   return Number.isFinite(v) && v > 0 ? v : null;
 }
 
-let persistedOk = null;
 async function requestPersistence() {
   if (!navigator.storage || !navigator.storage.persist) return;
   try {
     const already = await navigator.storage.persisted();
-    if (already) { persistedOk = true; return; }
-    persistedOk = await navigator.storage.persist();
-  } catch { persistedOk = false; }
+    if (!already) await navigator.storage.persist();
+  } catch {}
 }
 
 // ============================================================

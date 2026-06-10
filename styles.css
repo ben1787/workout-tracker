@@ -396,6 +396,26 @@ input:disabled {
   border-color: rgba(251, 191, 36, 0.3);
 }
 
+.chart {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.chart svg { display: block; }
+.chart-label {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-dim);
+}
+.chart-trend {
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-dim);
+}
+.chart-trend.good { color: var(--accent); }
+.chart-trend.bad { color: var(--warn); }
+
 .ex-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(110px, 1fr));
