@@ -420,7 +420,7 @@ const views = {
     plan.days.forEach((d, idx) => {
       const isSuggested = idx === suggestedIdx && !(state.active && state.active.planId === plan.id);
       const dayCount = planSessions.filter(s => s.dayIndex === idx).length;
-      list.appendChild(el('div', { class: 'card tap' + (isSuggested ? ' current' : ''), on: { click: () => startDay(plan, idx) } }, [
+      const card = el('div', { class: 'card tap' + (isSuggested ? ' current' : ''), on: { click: () => startDay(plan, idx) } }, [
         el('div', { class: 'spread' }, [
           el('div', {}, [
             el('div', { class: 'exercise-name' }, `Day ${d.day}: ${d.name}`),
@@ -433,7 +433,11 @@ const views = {
           ]),
         ]),
         d.notes ? el('div', { class: 'muted' }, d.notes) : null,
-      ]));
+      ]);
+      if (d.type !== 'rest') {
+        renderHistoryChart(card, dayHistory(plan.id, idx), 'time', 'Total time — history');
+      }
+      list.appendChild(card);
     });
     root.appendChild(list);
   },
@@ -855,12 +859,10 @@ function buildSectionChartSVG(entries, kind) {
   return `<svg viewBox="0 0 ${W} ${H}" width="100%" height="${H}" preserveAspectRatio="xMinYMid meet" xmlns="http://www.w3.org/2000/svg">${out}</svg>`;
 }
 
-function renderSectionHistoryChart(card, planId, dayIndex, si, sec) {
-  const { kind, entries } = sectionHistory(planId, dayIndex, si, sec);
-  if (!kind || entries.length === 0) return;
+function renderHistoryChart(card, entries, kind, label) {
+  if (entries.length === 0) return;
 
-  const header = [el('div', { class: 'chart-label' },
-    kind === 'time' ? 'Time to complete — history' : 'Distance covered — history')];
+  const header = [el('div', { class: 'chart-label' }, label)];
 
   if (entries.length >= 2) {
     const latest = entries[entries.length - 1].value;
@@ -879,6 +881,21 @@ function renderSectionHistoryChart(card, planId, dayIndex, si, sec) {
     el('div', { class: 'spread' }, header),
     el('div', { html: buildSectionChartSVG(entries, kind) }),
   ]));
+}
+
+function renderSectionHistoryChart(card, planId, dayIndex, si, sec) {
+  const { kind, entries } = sectionHistory(planId, dayIndex, si, sec);
+  if (!kind) return;
+  renderHistoryChart(card, entries, kind,
+    kind === 'time' ? 'Time to complete — history' : 'Distance covered — history');
+}
+
+function dayHistory(planId, dayIndex) {
+  return state.workouts
+    .filter(w => w.planId === planId && w.dayIndex === dayIndex && w.startedAt != null && w.endedAt != null)
+    .sort((a, b) => a.startedAt - b.startedAt)
+    .map(w => ({ when: w.startedAt, value: w.endedAt - w.startedAt }))
+    .slice(-8);
 }
 
 function findPreviousSession(w) {
