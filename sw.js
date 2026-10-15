@@ -1,10 +1,17 @@
-const VERSION = 'wt-v24';
+const VERSION = 'wt-v38';
 const ASSETS = [
   './',
   './index.html',
   './styles.css',
   './app.js',
   './db.js',
+  './progress.js',
+  './corrections.js',
+  './exercise-catalog.js',
+  './tracking.js',
+  './ai-context.js',
+  './ai-time.js',
+  './ai-api.js',
   './manifest.webmanifest',
   './icons/icon-192.png',
   './icons/icon-512.png',
@@ -28,7 +35,7 @@ self.addEventListener('activate', (e) => {
 self.addEventListener('fetch', (e) => {
   if (e.request.method !== 'GET') return;
   const url = new URL(e.request.url);
-  if (url.origin !== self.location.origin) return;
+  if (url.origin !== self.location.origin || url.pathname.startsWith('/api/')) return;
 
   e.respondWith(
     caches.match(e.request).then((cached) => {

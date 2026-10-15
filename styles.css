@@ -433,3 +433,78 @@ input:disabled {
 .ex-tile .stat-value { font-size: 20px; color: var(--accent); }
 .ex-tile .stat-label { text-transform: none; letter-spacing: 0; font-size: 13px; color: var(--text); }
 
+
+/* Daily coaching */
+.hero { padding: 24px; gap: 18px; background: linear-gradient(145deg, #16271e, var(--surface)); }
+.hero h2 { font-size: 28px; line-height: 1.15; letter-spacing: -0.03em; max-width: 360px; }
+.eyebrow { color: var(--text-dim); font-size: 11px; text-transform: uppercase; letter-spacing: .12em; }
+.field { display: flex; flex-direction: column; gap: 7px; }
+.field label { font-size: 14px; font-weight: 500; }
+.field textarea { min-height: 90px; font-family: inherit; font-size: 16px; }
+form.card { gap: 18px; }
+.inactive-goal { opacity: .65; }
+.notice { border: 1px solid var(--border); padding: 14px; border-radius: 10px; color: var(--text-dim); font-size: 14px; }
+button:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+@media (max-width: 400px) { .stats-row { grid-template-columns: repeat(2, 1fr); } .header { flex-wrap: wrap; } }
+
+/* Compact workout details, shared by preview and tracking. */
+.workout-list { display: flex; flex-direction: column; gap: 8px; }
+.disclosure { display: block; }
+.disclosure > summary { list-style: none; display: flex; align-items: center; justify-content: space-between; gap: 16px; cursor: pointer; min-height: 48px; touch-action: manipulation; }
+.disclosure > summary::-webkit-details-marker { display: none; }
+.disclosure > summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 5px; border-radius: 4px; }
+.disclosure-heading { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.disclosure-title { font-size: 16px; font-weight: 600; line-height: 1.35; }
+.disclosure-subtitle { color: var(--text-dim); font-size: 13px; line-height: 1.4; }
+.disclosure-arrow { color: var(--text-dim); flex-shrink: 0; transition: transform .15s; }
+.disclosure[open] > summary .disclosure-arrow { transform: rotate(180deg); }
+.disclosure-body { display: flex; flex-direction: column; gap: 14px; padding-top: 18px; }
+.disclosure-body p { white-space: pre-line; }
+.disclosure-body .disclosure { border-top: 1px solid var(--border); padding-top: 10px; }
+.detail-group { display: flex; flex-direction: column; gap: 7px; }
+.detail-group h3 { font-size: 13px; color: var(--text); }
+.disclosure-body .prescription { color: var(--text); font-size: 14px; }
+.setup-disclosure > summary { min-height: 32px; }
+.setup-disclosure .workout-setup, .setup-disclosure form { display: flex; flex-direction: column; gap: 18px; }
+.exercise-disclosure { padding: 12px 16px; }
+.workout-overview .disclosure-title { font-size: 20px; }
+
+.workout-chat { margin-top: 8px; gap: 14px; }
+.workout-chat textarea { min-height: 86px; }
+.chat-messages { display: flex; flex-direction: column; gap: 10px; }
+.chat-message { border-left: 2px solid var(--border); padding: 8px 12px; display: flex; flex-direction: column; gap: 5px; }
+.chat-message.user { border-left-color: var(--accent); }
+.chat-message p, .chat-latest { font-size: 14px; white-space: pre-wrap; }
+
+.history-entry > .disclosure-body { border-top: 1px solid var(--border); margin-top: 12px; }
+.history-entry .set-row { grid-template-columns: 24px minmax(0, 1fr) minmax(0, 1fr) auto; padding: 8px; font-size: 13px; }
+.history-entry .set-row .mono { overflow-wrap: anywhere; }
+.history-entry .set-row.done { opacity: 1; }
+
+/* Progress */
+select { appearance: auto; width: 100%; min-height: var(--tap); padding: 12px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface-2); color: var(--text); font: inherit; }
+select:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.progress-coach { gap: 14px; }
+.progress-coach .coach-summary { color: var(--text); }
+.coach-observations { margin: 0; padding-left: 20px; color: var(--text-dim); font-size: 14px; display: flex; flex-direction: column; gap: 8px; }
+.progress-values { border-collapse: collapse; width: 100%; font-size: 13px; }
+.progress-values th, .progress-values td { padding: 8px; text-align: left; border-bottom: 1px solid var(--border); }
+.progress-values td:last-child, .progress-values th:last-child { text-align: right; }
+.progress-chart svg { display: block; }
+.tab-bar button { padding: 10px 6px; font-size: 14px; }
+
+.coach-refresh { min-height: 34px; min-width: 34px; padding: 4px 10px; font-size: 22px; }
+.result-correction { gap: 14px; }
+.result-correction textarea { min-height: 88px; }
+
+input[type="checkbox"] {
+  appearance: auto;
+  -webkit-appearance: checkbox;
+  width: 20px;
+  height: 20px;
+  min-height: 20px;
+  flex: 0 0 20px;
+  margin: 0;
+  padding: 0;
+  accent-color: var(--accent);
+}
