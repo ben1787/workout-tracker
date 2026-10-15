@@ -1,3 +1,4 @@
+import { requireAccount, isHosted } from './cloud.js';
 import { trackingFor, trackingResult } from './tracking.js';
 import * as db from './db.js';
 import { buildAIContext } from './ai-context.js';
@@ -1735,6 +1736,8 @@ async function requestPersistence() {
 // ============================================================
 
 async function init() {
+  await requireAccount();
+  if(!isHosted()) {const migration=document.createElement('aside');migration.className='account-bar';migration.append(el('span',{},'Saved on this device'),el('button',{on:{click:exportData}},'Export for another device'));document.body.prepend(migration);}
   requestPersistence(); // best-effort; tells the browser not to evict our data
   state.plans = await db.listPlans();
   state.workouts = await db.listWorkouts();
@@ -1756,4 +1759,4 @@ async function init() {
   for (const w of state.workouts.filter(w => w.progressReviewStatus === 'pending' && !w.progressReview)) reviewCompletedWorkout(w.id);
 }
 
-init();
+init().catch(error=>{const root=document.getElementById('app');root.replaceChildren(el('h1',{},'Could not open your workouts'),el('p',{},error.message),el('button',{on:{click:()=>location.reload()}},'Retry'));});

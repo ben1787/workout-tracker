@@ -15,7 +15,7 @@ charted as actual results. Old programs are preserved in backups but no longer a
 
 ## Run locally
 
-Requires Node.js 22 or later. No packages to install.
+Requires Node.js 22 or later. Run `npm ci` first.
 
 1. Copy `.env.example` to `.env`.
 2. Set `OPENAI_API_KEY` in `.env` to your OpenAI API key. API usage is billed by
@@ -35,17 +35,48 @@ Import backup adds new goals/sessions and skips IDs already present. It never
 replaces existing records. Exports contain goals, completed sessions and legacy
 plans; they do not contain an unfinished session or a workout suggestion.
 
-## Hosting
+## Hosted account on Render
 
-The old GitHub Pages version is static and cannot run the AI endpoint. This
-server binds to 127.0.0.1 and enforces local origins. Using AI on your phone will
-require an authenticated HTTPS backend and a frontend deployment that points to
-it. Do not expose this personal local server publicly or publish the API key.
-No deployment is performed by these changes.
+`render.yaml` defines a separate Workout App project with a Node web service and
+Postgres in Frankfurt. Free tiers are a trial: the web service sleeps when idle,
+and the database expires after 30 days. Export backups or upgrade before expiry.
+
+With `DATABASE_URL` set, goals, exercises, legacy plans and completed workouts
+are stored in Postgres, scoped to the authenticated account. Without it the app
+continues using its original browser store. In-progress sessions and unstarted
+suggestions stay on the device until completion; completed history is shared.
+
+The hosted app requires an account. Owner enrollment requires the private
+`SETUP_TOKEN` and is disabled after the first account is created. Passwords use
+salted scrypt hashes. Random session tokens are stored as hashes in Postgres;
+the browser gets a Secure, HttpOnly, SameSite cookie. Login is rate-limited,
+mutations require the app's exact Origin, and all data/AI routes require sign-in.
+`PUBLIC_ORIGIN` overrides the expected origin; Render's external URL is used by
+default. The OpenAI key stays in the service's private environment.
+
+Use the private setup link to choose an email and a password (12+ characters).
+There is no public signup or email password-recovery service in this personal
+trial. An operator can reset access through the database if needed.
+
+Migration preserves the local copy. Export from the original browser or phone,
+then use History → Import backup after signing in to the hosted app. Imports
+append records and skip existing IDs atomically. A private bootstrap import can
+stage the owner's initial backup before enrollment; registration claims it in
+the same transaction and removes the staging copy. No history is publicly served.
+
+Each saved record has a server revision. Edits made from a stale device receive
+a conflict instead of overwriting a newer record; refresh before retrying. AI
+reviews additionally compare the result revision to avoid replacing corrections.
+The account bar's Refresh button loads the latest data from other devices.
+
+GitHub Pages automatic deployments are disabled; Render is the release target.
+The existing Pages deployment remains available for exporting old-device data.
 
 ## Checks
 
-`npm test` runs deterministic regression coverage. Live generation also needs a
+`npm test` runs deterministic regression coverage. Set `TEST_DATABASE_URL` to an
+isolated Postgres database to also run the hosted HTTP/auth/storage regression.
+That test uses a temporary schema; CI provisions a disposable Postgres service. Live generation also needs a
 configured API key. An HTTP stub can verify protocol and UI plumbing, but does
 not establish real model quality or account access.
 

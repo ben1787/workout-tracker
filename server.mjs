@@ -1,4 +1,5 @@
 import http from 'node:http';
+import { createCloudStore } from './cloud-store.mjs';
 import { readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { join } from 'node:path';
@@ -7,7 +8,20 @@ import { AI_WORKFLOWS, runAIWorkflow } from './ai/registry.mjs';
 const root = fileURLToPath(new URL('.', import.meta.url));
 const port = Number(process.env.PORT || 8765);
 const types = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.webmanifest': 'application/manifest+json', '.png': 'image/png' };
-const publicFiles = new Set(['index.html', 'app.js', 'db.js', 'progress.js', 'corrections.js', 'exercise-catalog.js', 'tracking.js', 'ai-context.js', 'ai-time.js', 'ai-api.js', 'styles.css', 'sw.js', 'manifest.webmanifest']);
+const publicFiles = new Set(['index.html', 'app.js', 'db.js', 'progress.js', 'corrections.js', 'exercise-catalog.js', 'tracking.js', 'cloud.js', 'ai-context.js', 'ai-time.js', 'ai-api.js', 'styles.css', 'sw.js', 'manifest.webmanifest']);
+const cloud = process.env.DATABASE_URL ? createCloudStore(process.env.DATABASE_URL, {secure: process.env.PUBLIC_ORIGIN?.startsWith('https://') !== false}) : null;
+if (process.env.RENDER && !cloud) throw new Error('DATABASE_URL is required on Render.');
+if (cloud && !process.env.PUBLIC_ORIGIN && !process.env.RENDER_EXTERNAL_URL) throw new Error('PUBLIC_ORIGIN is required for hosted access.');
+const publicOrigin = process.env.PUBLIC_ORIGIN || process.env.RENDER_EXTERNAL_URL;
+const loginAttempts = new Map();
+function rateLimit(req) {
+  const ip = process.env.RENDER ? String(req.headers['x-forwarded-for'] || '').split(',').at(-1).trim() : req.socket.remoteAddress;
+  const key = ip || 'unknown';
+  const current = loginAttempts.get(key);
+  if (!current || current.until < Date.now()) loginAttempts.set(key,{count:1,until:Date.now()+15*60000});
+  else if (++current.count > 12) throw Object.assign(new Error('Too many login attempts. Try again in 15 minutes.'),{status:429});
+  if(loginAttempts.size>10000) for(const [key,value] of loginAttempts) if(value.until<Date.now()) loginAttempts.delete(key);
+}
 let generating = false;
 function json(res, status, value) {
   res.writeHead(status, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' });
@@ -25,12 +39,42 @@ async function body(req) {
 }
 
 const server = http.createServer(async (req, res) => {
-  // This personal server is deliberately local-only. Reject DNS rebinding and
-  // cross-origin calls before accepting any request that can spend API credits.
-  const hosts = new Set([`127.0.0.1:${port}`, `localhost:${port}`]);
-  if (!hosts.has(req.headers.host)) return json(res, 403, { error: 'Local access only.' });
-  const url = new URL(req.url, `http://${req.headers.host}`);
-  if (req.headers.origin && req.headers.origin !== url.origin) return json(res, 403, { error: 'Use the app from its own address.' });
+  res.setHeader('X-Content-Type-Options','nosniff');
+  res.setHeader('Referrer-Policy','no-referrer');
+  res.setHeader('X-Frame-Options','DENY');
+  res.setHeader('Content-Security-Policy', "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self'; object-src 'none'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'");
+  const allowedOrigin = cloud ? publicOrigin : `http://${req.headers.host}`;
+  if (cloud ? req.headers.host !== new URL(publicOrigin).host : !new Set([`127.0.0.1:${port}`,`localhost:${port}`]).has(req.headers.host)) return json(res,403,{error:'Use the app from its own address.'});
+  const url = new URL(req.url,allowedOrigin);
+  if (req.headers.origin && req.headers.origin !== allowedOrigin) return json(res,403,{error:'Use the app from its own address.'});
+  if(cloud && !['GET','HEAD'].includes(req.method) && req.headers.origin!==allowedOrigin) return json(res,403,{error:'A same-origin request is required.'});
+  if(url.pathname==='/api/health' && req.method==='GET') {try {if(cloud) await cloud.health(); return json(res,200,{ok:true});} catch {return json(res,503,{error:'Storage unavailable.'});}}
+  let user=null;
+  if(cloud && url.pathname.startsWith('/api/')) {
+    try {
+      user=await cloud.authenticate(req);
+      if(url.pathname==='/api/auth/session' && req.method==='GET') return json(res,200,{cloud:true,user,setupRequired:!await cloud.isSetup()});
+      if(['/api/auth/login','/api/auth/register'].includes(url.pathname) && req.method==='POST') {
+        rateLimit(req);
+        if(req.headers['content-type']!=='application/json') return json(res,415,{error:'Use application/json.'});
+        const result=await cloud[url.pathname.endsWith('register')?'register':'login'](await body(req));
+        res.setHeader('Set-Cookie',result.cookie); return json(res,200,{user:result.user});
+      }
+      if(url.pathname==='/api/auth/bootstrap' && req.method==='POST') {rateLimit(req); return json(res,200,await cloud.bootstrap(await body(req)));}
+      if(!user) return json(res,401,{error:'Please sign in to continue.'});
+      if(url.pathname==='/api/auth/logout' && req.method==='POST') {res.setHeader('Set-Cookie',await cloud.logout(req)); return json(res,200,{ok:true});}
+      if(url.pathname==='/api/data/import' && req.method==='POST') return json(res,200,await cloud.import(user,await body(req)));
+      const match=/^\/api\/data\/(plans|workouts|goals|exercises)(?:\/(.+))?$/.exec(url.pathname);
+      if(match) {
+        const [,kind,encodedId]=match; const id=encodedId?decodeURIComponent(encodedId):null;
+        if(req.method==='GET') return json(res,200,await cloud.list(user,kind,id));
+        if(req.method==='PUT' && !id) {const {record,expectedResultsRevision}=await body(req); return json(res,200,await cloud.save(user,kind,record,expectedResultsRevision));}
+        if(req.method==='DELETE' && id) return json(res,200,await cloud.remove(user,kind,id,Number(req.headers['if-match'])));
+        return json(res,405,{error:'Method not allowed.'});
+      }
+    } catch(error) {return json(res,error.status || 503,{error:error.status?error.message:'Storage is temporarily unavailable. Please try again.'});}
+  }
+  if(!cloud && url.pathname==='/api/auth/session') return json(res,200,{cloud:false,user:null});
   if (url.pathname === '/api/status' && req.method === 'GET') return json(res, 200, { ready: !!process.env.OPENAI_API_KEY });
   if (AI_WORKFLOWS[url.pathname]) {
     if (req.method !== 'POST') return json(res, 405, { error: 'Use POST.' });
@@ -57,4 +101,7 @@ const server = http.createServer(async (req, res) => {
     res.end(req.method === 'HEAD' ? undefined : bytes);
   } catch { json(res, 404, { error: 'Not found.' }); }
 });
-server.listen(port, '127.0.0.1', () => console.log(`Workout Tracker: http://127.0.0.1:${port} (AI ${process.env.OPENAI_API_KEY ? 'connected' : 'needs OPENAI_API_KEY'})`));
+if (cloud) await cloud.ready;
+server.listen(port, cloud ? '0.0.0.0' : '127.0.0.1', () => console.log(`Workout Tracker: http://127.0.0.1:${port} (AI ${process.env.OPENAI_API_KEY ? 'connected' : 'needs OPENAI_API_KEY'})`));
+
+process.on('SIGTERM',()=>server.close(async()=>{if(cloud) await cloud.close(); process.exit(0);}));

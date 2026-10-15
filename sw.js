@@ -1,4 +1,4 @@
-const VERSION = 'wt-v38';
+const VERSION = 'wt-v39';
 const ASSETS = [
   './',
   './index.html',
@@ -9,6 +9,7 @@ const ASSETS = [
   './corrections.js',
   './exercise-catalog.js',
   './tracking.js',
+  './cloud.js',
   './ai-context.js',
   './ai-time.js',
   './ai-api.js',

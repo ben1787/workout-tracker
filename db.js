@@ -1,6 +1,9 @@
+import { isHosted, cloudRequest } from './cloud.js';
 import { linkExerciseRecords, createExercise } from './exercise-catalog.js';
 const DB_NAME = 'workout-tracker';
 const DB_VERSION = 4;
+
+function stableJSON(value) { return JSON.stringify(value, (key, item)=>item && typeof item==='object' && !Array.isArray(item) ? Object.fromEntries(Object.keys(item).sort().map(key=>[key,item[key]])) : item); }
 
 let dbPromise;
 
@@ -29,7 +32,7 @@ function openDB() {
   return dbPromise;
 }
 
-function run(storeName, mode, fn) {
+function localRun(storeName, mode, fn) {
   return openDB().then(db => new Promise((resolve, reject) => {
     const tx = db.transaction(storeName, mode);
     const store = tx.objectStore(storeName);
@@ -39,21 +42,37 @@ function run(storeName, mode, fn) {
   }));
 }
 
-export const saveExercise = (exercise) => run('exercises', 'readwrite', s => s.put(exercise));
-export const listExercises = () => run('exercises', 'readonly', s => s.getAll());
-
-export const saveGoal = (goal) => run('goals', 'readwrite', s => s.put(goal));
-export const listGoals = () => run('goals', 'readonly', s => s.getAll());
-
-export const savePlan = (p) => run('plans', 'readwrite', s => s.put(p));
-export const listPlans = () => run('plans', 'readonly', s => s.getAll());
-export const getPlan = (id) => run('plans', 'readonly', s => s.get(id));
-export const deletePlan = (id) => run('plans', 'readwrite', s => s.delete(id));
-
-export const saveWorkout = (w) => run('workouts', 'readwrite', s => s.put(w));
+async function list(kind) {return isHosted()?cloudRequest(`/api/data/${kind}`):localRun(kind,'readonly',store=>store.getAll());}
+async function get(kind,id) {return isHosted()?cloudRequest(`/api/data/${kind}/${encodeURIComponent(id)}`):localRun(kind,'readonly',store=>store.get(id));}
+async function save(kind,record) {
+  if(!isHosted()) return localRun(kind,'readwrite',store=>store.put(record));
+  const result=await cloudRequest(`/api/data/${kind}`,{method:'PUT',body:JSON.stringify({record})});
+  record._serverRevision=result.record._serverRevision;
+  return record.id;
+}
+async function remove(kind,id) {
+  if(!isHosted()) return localRun(kind,'readwrite',store=>store.delete(id));
+  const record=await get(kind,id);
+  if(!record) return;
+  return cloudRequest(`/api/data/${kind}/${encodeURIComponent(id)}`,{method:'DELETE',headers:{'If-Match':String(record._serverRevision)}});
+}
+export const saveExercise=record=>save('exercises',record);
+export const listExercises=()=>list('exercises');
+export const saveGoal=record=>save('goals',record);
+export const listGoals=()=>list('goals');
+export const savePlan=record=>save('plans',record);
+export const listPlans=()=>list('plans');
+export const getPlan=id=>get('plans',id);
+export const deletePlan=id=>remove('plans',id);
+export const saveWorkout=record=>save('workouts',record);
 // Compare and write in one transaction so a slow AI review or another tab
 // cannot overwrite a newer result correction.
 export async function saveWorkoutIfRevision(record, expectedRevision) {
+  if(isHosted()) {
+    const result=await cloudRequest('/api/data/workouts',{method:'PUT',body:JSON.stringify({record,expectedResultsRevision:expectedRevision})});
+    if(result.record) record._serverRevision=result.record._serverRevision;
+    return result.saved;
+  }
   const database = await openDB();
   return new Promise((resolve, reject) => {
     const tx = database.transaction('workouts', 'readwrite');
@@ -69,11 +88,11 @@ export async function saveWorkoutIfRevision(record, expectedRevision) {
   });
 }
 
-export const getWorkout = (id) => run('workouts', 'readonly', s => s.get(id));
-export const deleteWorkout = (id) => run('workouts', 'readwrite', s => s.delete(id));
+export const getWorkout=id=>get('workouts',id);
+export const deleteWorkout=id=>remove('workouts',id);
 
 export async function listWorkouts() {
-  const all = await run('workouts', 'readonly', s => s.getAll());
+  const all = await list('workouts');
   return all.sort((a, b) => b.startedAt - a.startedAt);
 }
 
@@ -99,6 +118,7 @@ export async function importBackup(data) {
       }
     }
   }
+  if(isHosted()) return cloudRequest('/api/data/import',{method:'POST',body:JSON.stringify(data)});
   const db = await openDB();
   return new Promise((resolve, reject) => {
     const tx = db.transaction(names, 'readwrite');
@@ -132,7 +152,16 @@ export async function importBackup(data) {
 // A single transaction upgrades all existing history and legacy plans without
 // changing their results. Also run after imports to link older-device backups.
 export async function synchronizeExerciseCatalog(extra = {}) {
-  const linked = linkExerciseRecords({ exercises: await listExercises(), workouts: await listWorkouts(), plans: await listPlans(), ...extra });
+  const original = {exercises:await listExercises(),workouts:await listWorkouts(),plans:await listPlans()};
+  const linked = linkExerciseRecords({...original,...extra});
+  if(isHosted()) {
+    for(const kind of ['exercises','workouts','plans']) for(const record of linked[kind]) {
+      const previous=original[kind].find(item=>item.id===record.id);
+      if(previous?._serverRevision) record._serverRevision=previous._serverRevision;
+      if(stableJSON(record)!==stableJSON(previous)) await save(kind,record);
+    }
+    return linked;
+  }
   const database = await openDB();
   await new Promise((resolve, reject) => {
     const tx = database.transaction(['exercises', 'workouts', 'plans'], 'readwrite');
