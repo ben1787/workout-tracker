@@ -11,7 +11,7 @@ A failed review can be retried without losing the workout. Progress charts show
 weekly training frequency, logged reps, valid session time and exercise reps/load.
 Time spans over six hours are excluded from time charts as possible forgotten
 timers; original records remain untouched. Prescribed hold durations are not
-charted as actual results. Old programs are preserved in backups but no longer appear in the UI.
+charted as actual results. Old programs remain in storage but no longer appear in the UI.
 
 ## Run locally
 
