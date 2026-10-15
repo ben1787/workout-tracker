@@ -1,0 +1,55 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import pg from 'pg';
+import net from 'node:net';
+import { randomUUID } from 'node:crypto';
+import { spawn } from 'node:child_process';
+import { once } from 'node:events';
+
+test('hosted auth, owner enrollment, migration, account isolation and concurrent edits use real Postgres', {skip:!process.env.TEST_DATABASE_URL}, async t=>{
+  // A dedicated schema keeps this test away from all application data.
+  const admin=new pg.Pool({connectionString:process.env.TEST_DATABASE_URL});
+  const schema=`qa_${randomUUID().replaceAll('-','')}`;
+  await admin.query(`CREATE SCHEMA ${schema}`);
+  const connection=new URL(process.env.TEST_DATABASE_URL);connection.searchParams.set('options',`-c search_path=${schema}`);
+  const inspect=new pg.Pool({connectionString:connection.toString()});
+  const probe=net.createServer();probe.listen(0,'127.0.0.1');await once(probe,'listening');const port=probe.address().port;await new Promise(resolve=>probe.close(resolve));
+  const origin=`http://127.0.0.1:${port}`;
+  const server=spawn(process.execPath,['server.mjs'],{cwd:new URL('..',import.meta.url),env:{...process.env,RENDER:'',PORT:String(port),DATABASE_URL:connection.toString(),PUBLIC_ORIGIN:origin,SETUP_TOKEN:'test-owner-enrollment',OPENAI_API_KEY:''},stdio:['ignore','pipe','pipe']});
+  t.after(async()=>{server.kill();await once(server,'exit').catch(()=>{});await inspect.end();await admin.query(`DROP SCHEMA ${schema} CASCADE`);await admin.end();});
+  await Promise.race([once(server.stdout,'data'),once(server,'exit').then(()=>{throw new Error('Hosted server did not start');})]);
+  const call=async(path,method='GET',data,cookie,headers={})=>{
+    const response=await fetch(origin+path,{method,headers:{Origin:origin,'Content-Type':'application/json',...(cookie?{Cookie:cookie}:{}),...headers},...(data?{body:JSON.stringify(data)}:{})});
+    return {status:response.status,data:await response.json(),cookie:response.headers.get('set-cookie'),headers:response.headers};
+  };
+  assert.equal((await call('/api/health')).status,200);
+  assert.equal((await call('/api/auth/session')).data.setupRequired,true);
+  for(const route of ['/api/data/workouts','/api/status','/api/workout']) assert.equal((await call(route)).status,401);
+  const seed={plans:[],exercises:[],goals:[{id:'goal',title:'Pulling',active:true}],workouts:[{id:'imported',day:{name:'Imported'},sections:[],startedAt:1,endedAt:2}]};
+  assert.equal((await call('/api/auth/bootstrap','POST',{invite:'wrong',data:seed})).status,403);
+  assert.equal((await call('/api/auth/bootstrap','POST',{invite:'test-owner-enrollment',data:seed})).status,200);
+  assert.equal((await call('/api/auth/register','POST',{email:'a@example.test',password:'long-test-password',invite:'wrong'})).status,403);
+  const enrolled=await call('/api/auth/register','POST',{email:'a@example.test',password:'long-test-password',invite:'test-owner-enrollment'});
+  assert.equal(enrolled.status,200);assert.match(enrolled.cookie,/HttpOnly/);assert.match(enrolled.cookie,/SameSite=Lax/);
+  const cookie=enrolled.cookie.split(';')[0];
+  assert.equal((await call('/api/data/workouts','GET',null,cookie)).data[0].id,'imported');
+  assert.equal((await call('/api/auth/register','POST',{email:'b@example.test',password:'long-test-password',invite:'test-owner-enrollment'})).status,409);
+  assert.equal((await call('/api/data/import','POST',seed,cookie)).data.skipped,2);
+  const invalid={...seed,goals:[{id:'before-invalid',title:'Not committed',active:true}],workouts:[{id:'broken'}]};
+  assert.equal((await call('/api/data/import','POST',invalid,cookie)).status,400);
+  assert.equal((await call('/api/data/goals','GET',null,cookie)).data.length,1);
+  assert.equal((await call('/api/data/goals','PUT',{record:{id:'x',title:'cross-origin',active:true}},cookie,{Origin:'https://attacker.example'})).status,403);
+  const initial=(await call('/api/data/workouts','GET',null,cookie)).data[0];
+  const updated=await call('/api/data/workouts','PUT',{record:{...initial,resultsRevision:1,notes:'Corrected'}},cookie);assert.equal(updated.status,200);
+  assert.equal((await call('/api/data/workouts','PUT',{record:{...initial,notes:'Stale device edit'}},cookie)).status,409);
+  assert.equal((await call('/api/data/workouts','PUT',{record:initial,expectedResultsRevision:0},cookie)).data.saved,false);
+  assert.equal((await call('/api/data/workouts/imported','DELETE',null,cookie,{'If-Match':String(initial._serverRevision)})).status,409);
+  const second=randomUUID();await inspect.query('INSERT INTO app_users(id,email,password_hash) VALUES($1,$2,$3)',[second,'isolated@example.test','unused']);
+  await inspect.query('INSERT INTO app_records(user_id,kind,id,data) VALUES($1,$2,$3,$4)',[second,'goals','private',{id:'private',title:'Other account',active:true}]);
+  assert.equal((await call('/api/data/goals/private','GET',null,cookie)).data,null);
+  assert.equal((await call('/api/auth/logout','POST',{},cookie)).status,200);
+  assert.equal((await call('/api/data/goals','GET',null,cookie)).status,401);
+  assert.equal((await call('/api/auth/login','POST',{email:'a@example.test',password:'wrong-password'})).status,401);
+  assert.equal((await call('/api/auth/login','POST',{email:'a@example.test',password:'long-test-password'})).status,200);
+  assert.equal((await inspect.query('SELECT count(*) FROM app_bootstrap')).rows[0].count,'0');
+});

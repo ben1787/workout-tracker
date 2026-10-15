@@ -1,4 +1,11 @@
+import { requireAccount, isHosted } from './cloud.js';
+import { trackingFor, trackingResult } from './tracking.js';
 import * as db from './db.js';
+import { buildAIContext } from './ai-context.js';
+import { requestAI } from './ai-api.js';
+import { createExercise, linkExerciseRecords, findExercise } from './exercise-catalog.js';
+import { workoutDuration } from './corrections.js';
+import { weeklyProgress, exerciseProgress, workoutMetrics, exerciseAtLoad } from './progress.js';
 
 if ('serviceWorker' in navigator) {
   navigator.serviceWorker.register('sw.js').catch(() => {});
@@ -11,13 +18,39 @@ const now = () => Date.now();
 const state = {
   view: 'home',
   plans: [],
+  goals: [],
+  exercises: [],
+  exerciseError: '',
+  goalEditing: null,
+  goalError: '',
+  generating: false,
+  generationError: '',
+  revising: false,
+  revisionError: '',
+  feedback: loadJSON('wt.feedback', ''),
+  aiReady: null,
+  today: loadJSON('wt.today', { minutes: 45, equipment: '', limitations: '', feeling: '' }),
+  draft: loadJSON('wt.draft', null),
   workouts: [],
   active: null,
-  selectedPlanId: null,
-  selectedWorkoutId: null,
-  pasteText: '',
-  pasteError: '',
+  expandedWorkoutId: null,
+  progressWorkoutId: null,
+  reviewing: new Set(),
+  reviewErrors: {},
+  progressExercise: '',
+  progressMetric: 'reps',
+  progressLoad: 'all',
+  finishing: false,
+  finishError: '',
+  correcting: new Set(),
+  correctionErrors: {},
+  correctionMessages: {},
+  correctionInputs: loadJSON('wt.correctionInputs', {}),
 };
+
+function loadJSON(key, fallback) {
+  try { return JSON.parse(localStorage.getItem(key)) ?? fallback; } catch { return fallback; }
+}
 
 let wakeLock = null;
 async function acquireWakeLock() {
@@ -110,45 +143,6 @@ function requirePositiveNumber(v, where, field) {
   return n;
 }
 
-function normalizeJsonText(text) {
-  // iOS / chat apps substitute smart quotes and NBSP that JSON.parse rejects.
-  // Explicit \u escapes so the source bytes can't be mangled by any encoding layer.
-  return text
-    .replace(/[\u201C\u201D\u201E\u201F\u2033\u2036\u00AB\u00BB]/g, '"')
-    .replace(/[\u2018\u2019\u201A\u201B\u2032\u2035]/g, "'")
-    .replace(/[\u00A0\u202F\u2007\u200A\u200B\u3000\u2028\u2029]/g, ' ')
-    .replace(/[\u2013\u2014\u2212]/g, '-')
-    .replace(/\u2026/g, '...');
-}
-
-function parsePlan(text) {
-  const normalized = normalizeJsonText(text);
-  let data;
-  try { data = JSON.parse(normalized); }
-  catch (e) {
-    const m = /position (\d+)/.exec(e.message);
-    if (m) {
-      const pos = Number(m[1]);
-      const ch = normalized.charAt(pos);
-      const code = normalized.charCodeAt(pos).toString(16).toUpperCase().padStart(4, '0');
-      const ctx = normalized.slice(Math.max(0, pos - 25), pos) + '⟦' + ch + '⟧' + normalized.slice(pos + 1, pos + 25);
-      throw new Error(`Invalid JSON at position ${pos}: U+${code} (${ch === '\n' ? '\\n' : ch}).\n${ctx}`);
-    }
-    throw new Error(`Invalid JSON: ${e.message}`);
-  }
-  if (!data || typeof data !== 'object') throw new Error('Top-level must be a JSON object.');
-
-  const name = requireString(data.program_name ?? data.name, 'plan', 'program_name');
-  const duration_weeks = requirePositiveNumber(data.duration_weeks, 'plan', 'duration_weeks');
-
-  if (!Array.isArray(data.days) || data.days.length === 0) {
-    throw new Error('Plan needs a non-empty "days" array.');
-  }
-  const days = data.days.map((d, i) => parseDay(d, i));
-
-  return { id: uid(), createdAt: now(), name, duration_weeks, days };
-}
-
 function parseDay(day, idx) {
   const where = `Day ${idx + 1}`;
   if (!day || typeof day !== 'object') throw new Error(`${where}: not an object.`);
@@ -166,7 +160,7 @@ function parseDay(day, idx) {
     sections = day.sections.map((s, si) => parseSection(s, idx, si));
   }
 
-  return { day: dayNum, name, type: day.type, notes, sections };
+  return { day: dayNum, name, type: day.type, notes, summary: typeof day.summary === 'string' ? day.summary : '', sections };
 }
 
 function parseSection(s, di, si) {
@@ -176,7 +170,7 @@ function parseSection(s, di, si) {
   if (!VALID_SECTION_TYPES.includes(s.type)) {
     throw new Error(`${where} (${name}): "type" must be one of ${VALID_SECTION_TYPES.join('|')}.`);
   }
-  const out = { name, type: s.type };
+  const out = { name, type: s.type, tracking: s.tracking, exerciseId: s.exerciseId || s.exercise_id || null, instructions: typeof s.instructions === 'string' ? s.instructions : '', why: typeof s.why === 'string' ? s.why : '' };
 
   if (s.type === 'circuit') {
     const rounds = posOrNull(s.rounds);
@@ -198,6 +192,8 @@ function parseSection(s, di, si) {
     // Use the first exercise entry; extras are ignored. Use circuit type for multi-exercise blocks.
     const first = parseExerciseEntry(s.exercises[0], `${where} (${name}) exercise 1`);
     out.exerciseName = first.name;
+    out.exerciseId = first.exerciseId; out.holdSeconds = first.holdSeconds;
+    out.exerciseInstructions = first.instructions; out.tracking = first.tracking;
     out.reps = first.reps;
     out.weight = first.weight;
   } else if (TIMER_SECTION_TYPES.includes(s.type)) {
@@ -218,7 +214,7 @@ function parseExerciseEntry(ex, where) {
   const name = requireString(ex.name, where, 'name');
   const reps = nonNegOrZero(ex.reps);
   const weight = nonNegOrZero(ex.weight);
-  return { name, reps, weight };
+  return { name, tracking: ex.tracking, exerciseId: ex.exerciseId || ex.exercise_id || null, holdSeconds: nonNegOrZero(ex.holdSeconds ?? ex.hold_seconds), reps, weight, instructions: typeof ex.instructions === 'string' ? ex.instructions : '' };
 }
 
 // ============================================================
@@ -250,7 +246,7 @@ function buildActive(plan, dayIdx) {
     planId: plan.id,
     planName: plan.name,
     dayIndex: dayIdx,
-    day: { day: day.day, name: day.name, type: day.type, notes: day.notes },
+    day: { day: day.day, name: day.name, type: day.type, notes: day.notes, summary: day.summary },
     sections,
     currentSectionIdx: 0,
     startedAt: null, // set on first user action (start round / start set / start timer / skip / finish)
@@ -294,152 +290,488 @@ function render() {
 // Views
 // ============================================================
 
-const views = {
-  home(root) {
-    root.appendChild(el('div', { class: 'header' }, [
-      el('div', { class: 'title' }, [el('h1', {}, 'Plans')]),
-      el('button', { class: 'icon ghost', on: { click: () => go('history') } }, 'History'),
-    ]));
+function pageHeader(root, title) {
+  root.appendChild(el('header', { class: 'header' }, [
+    el('div', { class: 'title' }, [el('div', { class: 'eyebrow' }, 'Workout'), el('h1', {}, title)]),
+  ]));
+  root.appendChild(el('nav', { class: 'tab-bar', 'aria-label': 'Main navigation' }, [
+    ...[['home', 'Today'], ['goals', 'Goals'], ['progress', 'Progress'], ['history', 'History']].map(([view, label]) =>
+      el('button', { class: state.view === view || (view === 'home' && state.view === 'today') ? 'active' : '', 'aria-current': state.view === view ? 'page' : null, on: { click: () => go(view) } }, label)),
+  ]));
+}
 
-    // Backup reminder
-    const last = lastExportAt();
-    const daysSince = last ? Math.floor((Date.now() - last) / 86400000) : null;
-    const needsBackup = state.workouts.length > 0 && (last === null || daysSince >= 7);
-    if (needsBackup) {
-      root.appendChild(el('div', { class: 'card backup-card' }, [
-        el('div', { class: 'spread' }, [
-          el('div', {}, [
-            el('div', { class: 'exercise-name' }, last ? `Backup is ${daysSince}d old` : 'Back up your history'),
-            el('div', { class: 'muted' },
-              last
-                ? `Clearing Safari data would erase ${state.workouts.length} session${state.workouts.length === 1 ? '' : 's'}.`
-                : `${state.workouts.length} session${state.workouts.length === 1 ? '' : 's'} saved locally only. Download a backup file to keep them safe.`,
-            ),
-          ]),
-        ]),
-        el('div', { class: 'row' }, [
-          el('button', { class: 'primary', on: { click: () => exportData() } }, '⬇ Download backup'),
-          el('button', { class: 'ghost', on: { click: () => { localStorage.setItem(LAST_EXPORT_KEY, String(Date.now())); render(); } } }, 'Dismiss'),
-        ]),
-      ]));
+let fieldId = 0;
+function field(parent, label, attrs, value, multiline = false) {
+  const id = `field-${++fieldId}`;
+  const input = el(multiline ? 'textarea' : 'input', { id, ...attrs });
+  input.value = value ?? '';
+  parent.appendChild(el('div', { class: 'field' }, [el('label', { for: id }, label), input]));
+  return input;
+}
+
+function disclosure(title, subtitle, content, className = '', open = false) {
+  return el('details', { class: `disclosure ${className}`, open }, [
+    el('summary', {}, [
+      el('span', { class: 'disclosure-heading' }, [el('span', { class: 'disclosure-title' }, title), subtitle ? el('span', { class: 'disclosure-subtitle' }, subtitle) : null]),
+      el('span', { class: 'disclosure-arrow', 'aria-hidden': 'true' }, '⌄'),
+    ]),
+    el('div', { class: 'disclosure-body' }, content),
+  ]);
+}
+
+function sectionTitle(section) {
+  return section.type === 'exercise' ? section.exerciseName || section.name : section.name;
+}
+
+function sectionPrescription(section) {
+  if (section.type === 'exercise') {
+    const reps = section.holdSeconds ? `${section.holdSeconds}s hold` : section.reps ? `${section.reps} reps` : 'hold';
+    return `${section.sets} sets · ${reps}${section.weight ? ` · ${section.weight} lb` : ''}`;
+  }
+  if (section.type === 'circuit') return `${section.rounds} rounds · ${section.exercises.length} exercises`;
+  return [section.duration_minutes ? `${section.duration_minutes} min` : '', section.distance_miles ? `${section.distance_miles} mi` : ''].filter(Boolean).join(' · ') || 'Timed';
+}
+
+function sectionDetails(section) {
+  const children = [];
+  const definition = findExercise(state.exercises, section.exerciseId, section.exerciseName || section.name);
+  if (definition?.instructions) children.push(el('p', {}, definition.instructions));
+  if (section.type === 'exercise') children.push(el('p', { class: 'prescription' }, sectionSummary(section)));
+  if (section.instructions) children.push(el('p', {}, section.instructions));
+  if (section.exerciseInstructions && section.exerciseInstructions !== section.instructions) children.push(el('p', {}, section.exerciseInstructions));
+  if (section.type === 'circuit') {
+    if (section.interval_seconds) children.push(el('p', {}, `Round target: ${fmtDuration(section.interval_seconds * 1000)}`));
+    section.exercises.forEach(ex => children.push(exerciseInstructions(ex)));
+  }
+  if (section.target_intensity) children.push(el('p', {}, section.target_intensity));
+  if (section.why) children.push(el('div', { class: 'detail-group' }, [el('h3', {}, 'Why this exercise'), el('p', {}, section.why)]));
+  if (!children.length) children.push(el('p', {}, sectionSummary(section)));
+  return children;
+}
+
+function workoutDetails(day, rationale, goals = []) {
+  return [
+    day.summary ? el('p', {}, day.summary) : null,
+    rationale ? el('div', { class: 'detail-group' }, [el('h3', {}, 'Why this workout'), el('p', {}, rationale)]) : null,
+    goals.length ? el('p', { class: 'muted' }, `Working toward: ${goals.map(g => g.title).join(' · ')}`) : null,
+    day.notes ? el('div', { class: 'detail-group' }, [el('h3', {}, 'Session instructions'), el('p', {}, day.notes)]) : null,
+  ];
+}
+
+async function checkAI() {
+  try {
+    const response = await fetch('/api/status', { cache: 'no-store' });
+    state.aiReady = response.ok && (await response.json()).ready === true;
+  } catch { state.aiReady = false; }
+  if (state.view === 'today' && !state.generating) render();
+}
+
+async function generateWorkout(feedback = null) {
+  if (state.generating || state.active) return;
+  const goals = state.goals.filter(g => g.active).map(({ id, title, details }) => ({ id, title, details }));
+  if (!goals.length) return;
+  const previous = state.draft;
+  const today = { ...state.today };
+  state.generating = true; state.revising = !!feedback; state.generationError = ''; state.revisionError = ''; render();
+  try {
+    const data = await requestAI('workout', buildAIContext({ workflow: 'workout', state, today, feedback }));
+    for (const exercise of data.catalogUpdates || []) await db.saveExercise(exercise);
+    state.exercises = await db.listExercises();
+    const day = parseDay({ ...data.workout, day: 1 }, 0);
+    if (typeof data.rationale !== 'string') throw new Error('The AI returned an incomplete workout. Please try again.');
+    const conversation = feedback ? [...(previous.conversation || []), { role: 'user', content: feedback }, { role: 'assistant', content: data.message || 'Updated your workout.' }] : [];
+    const draft = { id: uid(), day, rationale: data.rationale, goals, today, conversation, createdAt: now() };
+    localStorage.setItem('wt.draft', JSON.stringify(draft));
+    state.draft = draft; state.aiReady = true;
+    if (feedback) { state.feedback = ''; localStorage.removeItem('wt.feedback'); }
+  } catch (error) {
+    const message = error.name === 'TimeoutError' ? 'The suggestion took too long. Please try again.' : error.message || 'Could not connect to AI. Please try again.';
+    if (feedback) state.revisionError = message; else state.generationError = message;
+  } finally { state.generating = false; state.revising = false; render(); }
+}
+
+function draftGoalsChanged() {
+  return state.draft && JSON.stringify(state.draft.goals) !== JSON.stringify(state.goals.filter(g => g.active).map(({ id, title, details }) => ({ id, title, details })));
+}
+
+function startDailyWorkout() {
+  if (!state.draft || state.active) return;
+  if (draftGoalsChanged()) { state.generationError = 'Your active goals changed. Generate a new suggestion before starting.'; go('today'); return; }
+  const d = state.draft;
+  state.active = buildActive({ id: 'daily', name: 'Daily workout', days: [d.day] }, 0);
+  state.active.source = 'ai';
+  state.active.goals = d.goals;
+  state.active.rationale = d.rationale;
+  state.active.conversation = d.conversation || [];
+  state.active.today = d.today;
+  saveActive();
+  state.draft = null; state.feedback = ''; localStorage.removeItem('wt.draft'); localStorage.removeItem('wt.feedback');
+  acquireWakeLock(); go('session');
+}
+
+async function reviewCompletedWorkout(id, force = false) {
+  if (state.reviewing.has(id)) return;
+  state.reviewing.add(id); delete state.reviewErrors[id];
+  if (state.view === 'progress') render();
+  let revision = null;
+  try {
+    const workout = await db.getWorkout(id);
+    if (!workout || (workout.progressReview && !force)) return;
+    revision = workout.resultsRevision || 0;
+    const review = await requestAI('progress', buildAIContext({ workflow: 'progress', state, selectedWorkoutId: id }));
+    const existing = await db.getWorkout(id);
+    if (existing && (existing.resultsRevision || 0) === revision) await db.saveWorkoutIfRevision({ ...existing, progressReviewStatus: 'ready', progressReview: { ...review, createdAt: now() } }, revision);
+    state.workouts = await db.listWorkouts();
+  } catch (error) {
+    const existing = await db.getWorkout(id);
+    if (existing && (existing.resultsRevision || 0) === revision) {
+      state.reviewErrors[id] = error.name === 'TimeoutError' ? 'AI took too long. Your workout is saved; try the review again.' : error.message;
+      if (!await db.saveWorkoutIfRevision({ ...existing, progressReviewStatus: 'error' }, revision)) delete state.reviewErrors[id];
     }
+    state.workouts = await db.listWorkouts();
+  } finally {
+    state.reviewing.delete(id);
+    if (state.view === 'progress') render();
+    const pending = state.workouts.find(w => w.id === id && w.progressReviewStatus === 'pending' && !w.progressReview);
+    if (pending && !state.reviewErrors[id]) reviewCompletedWorkout(id);
+  }
+}
 
-    root.appendChild(el('button', { class: 'primary', on: { click: () => go('paste') } }, '+ Paste training plan'));
+function progressChart(title, description, entries, key, unit) {
+  const values = entries.map(e => Math.max(0, Number(e[key]) || 0));
+  const max = Math.max(1, ...values);
+  const W = 480, H = 160, baseline = 132, plotHeight = 104;
+  const step = 440 / Math.max(1, entries.length);
+  const label = time => new Date(time).toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+  const fmt = value => Number(value.toFixed(1)).toLocaleString();
+  const card = el('div', { class: 'card progress-chart' }, [el('h2', {}, title), el('p', { class: 'muted' }, description)]);
+  const chartTitle = String(title).replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;').replaceAll('"', '&quot;');
+  let svg = `<svg viewBox="0 0 ${W} ${H}" width="100%" role="img" aria-label="${chartTitle}"><title>${chartTitle}</title>`;
+  for (let i = 0; i <= 2; i++) {
+    const y = baseline - i * plotHeight / 2;
+    svg += `<line x1="34" x2="478" y1="${y}" y2="${y}" stroke="var(--border)"/><text x="28" y="${y + 3}" text-anchor="end" fill="var(--text-dim)" font-size="10">${fmt(max * i / 2)}</text>`;
+  }
+  entries.forEach((entry, i) => {
+    const x = 38 + i * step, h = values[i] / max * plotHeight;
+    svg += `<rect x="${x}" y="${baseline - h}" width="${Math.max(4, step - 10)}" height="${h}" rx="3" fill="${i === entries.length - 1 ? 'var(--accent)' : 'var(--accent-dim)'}"><title>${label(entry.when)}: ${fmt(values[i])} ${unit}</title></rect>`;
+    if (entries.length <= 8 || i % 2 === 0 || i === entries.length - 1) svg += `<text x="${x + (step - 10) / 2}" y="151" text-anchor="middle" fill="var(--text-dim)" font-size="9">${label(entry.when)}</text>`;
+  });
+  svg += '</svg>';
+  card.appendChild(el('div', { html: svg }));
+  const table = el('table', { class: 'progress-values' }, [el('thead', {}, [el('tr', {}, [el('th', { scope: 'col' }, 'Date'), el('th', { scope: 'col' }, unit)])]), el('tbody', {}, entries.map((entry, i) => el('tr', {}, [el('td', {}, label(entry.when)), el('td', {}, fmt(values[i]))])))]);
+  card.appendChild(disclosure('View values', '', [table]));
+  return card;
+}
 
-    if (state.active) {
-      root.appendChild(el('div', { class: 'card current tap', on: { click: () => go('session') } }, [
-        el('div', { class: 'muted' }, 'In progress'),
-        el('div', { class: 'exercise-name' }, `${state.active.planName} — ${state.active.day.name}`),
-        el('div', { class: 'muted' }, 'Tap to resume'),
-      ]));
-    }
-
-    if (state.plans.length === 0) {
-      root.appendChild(el('div', { class: 'empty' }, 'No plans yet. Paste a plan to begin.'));
+async function correctWorkoutResult(id, request) {
+  if (state.correcting.has(id)) return;
+  state.correcting.add(id); delete state.correctionErrors[id];
+  state.expandedWorkoutId = id; render();
+  try {
+    const current = await db.getWorkout(id);
+    if (!current) throw new Error('This session no longer exists.');
+    const conversation = current.correctionConversation || [];
+    const freshState = { ...state, workouts: state.workouts.map(w => w.id === id ? current : w) };
+    const data = await requestAI('correction', buildAIContext({ workflow: 'correction', state: freshState, selectedWorkoutId: id, request }));
+    const existing = await db.getWorkout(id);
+    if (!existing || (existing.resultsRevision || 0) !== (current.resultsRevision || 0)) throw new Error('This result changed while AI was reviewing it. Please try again.');
+    const messages = [...conversation, { role: 'user', content: request }, { role: 'assistant', content: data.message }];
+    if (data.status === 'clarify') {
+      if (!await db.saveWorkoutIfRevision({ ...existing, correctionConversation: messages, resultsRevision: (existing.resultsRevision || 0) + 1 }, existing.resultsRevision || 0)) throw new Error('The session changed. Please try again.');
     } else {
-      const list = el('div', { class: 'list' });
-      for (const p of state.plans) {
-        list.appendChild(el('div', { class: 'card tap', on: { click: () => go('plan', { selectedPlanId: p.id }) } }, [
-          el('div', { class: 'spread' }, [
-            el('div', { class: 'exercise-name' }, p.name),
-            el('button', { class: 'danger', on: { click: (e) => { e.stopPropagation(); removePlan(p); } } }, 'Delete'),
-          ]),
-          el('div', { class: 'muted' }, `${p.duration_weeks} weeks · ${p.days.length} days/week`),
+      if (data.status !== 'apply' || data.workout?.id !== id) throw new Error('The correction was invalid. Your results are unchanged.');
+      const { resultUndo: oldUndo, ...before } = existing;
+      for (const exercise of data.catalogUpdates || []) await db.saveExercise(exercise);
+      state.exercises = await db.listExercises();
+      const updated = { ...data.workout, resultUndo: before, correctionConversation: messages, resultsRevision: (existing.resultsRevision || 0) + 1, resultsUpdatedAt: now(), progressReviewStatus: 'pending' };
+      delete updated.progressReview;
+      if (!await db.saveWorkoutIfRevision(updated, existing.resultsRevision || 0)) throw new Error('The results changed while applying this correction. Please try again.');
+    }
+    state.correctionMessages[id] = data.message;
+    delete state.correctionInputs[id]; localStorage.setItem('wt.correctionInputs', JSON.stringify(state.correctionInputs));
+    state.workouts = await db.listWorkouts();
+    if (data.status === 'apply') reviewCompletedWorkout(id);
+  } catch (error) {
+    state.correctionErrors[id] = error.name === 'TimeoutError' ? 'The edit took too long. Your original results are unchanged; please try again.' : error.message;
+  } finally { state.correcting.delete(id); if (state.view === 'history') render(); }
+}
+
+async function undoResultCorrection(id) {
+  const existing = await db.getWorkout(id);
+  if (!existing?.resultUndo || state.correcting.has(id)) return;
+  const restored = { ...existing.resultUndo, resultsRevision: (existing.resultsRevision || 0) + 1, resultsUpdatedAt: now(), progressReviewStatus: 'pending' };
+  delete restored.progressReview;
+  if (!await db.saveWorkoutIfRevision(restored, existing.resultsRevision || 0)) { toast('The results changed. Please reopen this session and try again.'); return; }
+  state.workouts = await db.listWorkouts(); state.expandedWorkoutId = id;
+  state.correctionMessages[id] = 'Restored the results from before your last edit.';
+  render(); reviewCompletedWorkout(id);
+}
+
+function renderResultCorrection(root, workout) {
+  const form = el('form', { class: 'card result-correction', 'aria-label': 'Correct session results' });
+  form.appendChild(el('h3', {}, 'Correct these results'));
+  const conversation = workout.correctionConversation || [];
+  if (conversation.length) {
+    form.appendChild(el('p', { class: 'muted', role: 'status' }, state.correctionMessages[workout.id] || conversation.at(-1).content));
+    form.appendChild(disclosure('Earlier corrections', '', conversation.slice(0, -1).map(m => el('p', {}, `${m.role === 'user' ? 'You' : 'Coach'}: ${m.content}`))));
+  } else if (state.correctionMessages[workout.id]) form.appendChild(el('p', { role: 'status' }, state.correctionMessages[workout.id]));
+  const input = field(form, 'What should change about this result?', { placeholder: 'e.g. I wore a 20 lb vest, skipped the last exercise, or took a 15-minute break…', maxlength: 4000, required: true }, state.correctionInputs[workout.id] || '', true);
+  input.disabled = state.correcting.has(workout.id);
+  input.addEventListener('input', () => { state.correctionInputs[workout.id] = input.value; localStorage.setItem('wt.correctionInputs', JSON.stringify(state.correctionInputs)); });
+  if (state.correctionErrors[workout.id]) form.appendChild(el('p', { class: 'error', role: 'alert' }, state.correctionErrors[workout.id]));
+  form.appendChild(el('button', { type: 'submit', class: 'primary', disabled: state.correcting.has(workout.id) }, state.correcting.has(workout.id) ? 'Updating results…' : 'Update results'));
+  if (workout.resultUndo) form.appendChild(el('button', { type: 'button', class: 'ghost', disabled: state.correcting.has(workout.id), on: { click: () => undoResultCorrection(workout.id) } }, 'Undo last result edit'));
+  form.addEventListener('submit', e => { e.preventDefault(); if (input.value.trim()) correctWorkoutResult(workout.id, input.value.trim()); });
+  root.appendChild(form);
+}
+
+function renderWorkoutRecord(root, w) {
+  const dur = w.endedAt ? workoutDuration(w) : null;
+  if (Number.isFinite(w.correctedDurationMs)) root.appendChild(el('p', { class: 'muted' }, `Corrected active time: ${fmtDuration(w.correctedDurationMs)} · original timer: ${fmtDuration(w.endedAt - w.startedAt)}. Round splits retain their recorded times.`));
+  if (w.vestWeight != null) root.appendChild(el('p', { class: 'muted' }, `Vest: ${w.vestWeight} lb`));
+    if (w.day.notes || w.rationale) root.appendChild(disclosure('About this workout', w.day.summary || '', workoutDetails(w.day, w.rationale, w.goals), 'card'));
+
+    // Last-time comparison banner
+    const prior = findPreviousSession(w);
+    if (prior) {
+      const priorDur = workoutDuration(prior);
+      const delta = (dur || 0) - priorDur;
+      const daysAgo = Math.round((w.startedAt - prior.startedAt) / 86400000);
+      const agoText = daysAgo < 1 ? 'earlier today' : daysAgo === 1 ? '1d ago' : `${daysAgo}d ago`;
+      const deltaText = Math.abs(delta) < 1000
+        ? '(same time)'
+        : `(${delta > 0 ? '+' : '−'}${fmtDuration(Math.abs(delta))} ${delta > 0 ? 'longer' : 'shorter'})`;
+      root.appendChild(el('div', { class: 'card' }, [
+        el('div', { class: 'muted' }, `Last time: ${agoText} · ${fmtDuration(priorDur)} ${deltaText}`),
+      ]));
+    }
+
+    if (w.notes && w.notes.trim()) {
+      root.appendChild(el('div', { class: 'card' }, [
+        el('div', { class: 'muted', style: 'font-style: italic;' }, `"${w.notes.trim()}"`),
+      ]));
+    }
+
+    if (w.day.type === 'rest') {
+      root.appendChild(el('div', { class: 'card' }, [el('div', { class: 'muted' }, 'Rest day — marked complete.')]));
+      return;
+    }
+
+    (w.sections || []).forEach((sec, secIdx) => {
+      const card = el('div', { class: 'card' });
+      card.appendChild(disclosure(sectionTitle(sec), sectionPrescription(sec), sectionDetails(sec)));
+      if (sec.skipped) card.appendChild(el('div', { class: 'muted' }, 'Skipped'));
+
+      if (sec.type === 'circuit') {
+        const stats = circuitStats(sec);
+        const avg = stats?.avg ?? 0;
+        const fastest = stats?.fastest ?? 0;
+        const slowest = stats?.slowest ?? 0;
+        card.appendChild(el('div', { class: 'muted' },
+          `${sec.completedRounds.length} / ${sec.rounds} rounds · avg ${fmtDuration(avg)} · fastest ${fmtDuration(fastest)} · slowest ${fmtDuration(slowest)}`,
+        ));
+        // Per-section comparison vs last time
+        const priorSec = prior?.sections?.[secIdx];
+        if (priorSec && priorSec.type === 'circuit' && !Number.isFinite(w.correctedDurationMs)) {
+          const ps = circuitStats(priorSec);
+          if (ps && Math.abs(avg - ps.avg) >= 1000) {
+            const avgDelta = avg - ps.avg;
+            const sign = avgDelta > 0 ? '+' : '−';
+            const word = avgDelta > 0 ? 'longer' : 'shorter';
+            card.appendChild(el('div', { class: 'muted' },
+              `vs last: avg ${fmtDuration(ps.avg)} (${sign}${fmtDuration(Math.abs(avgDelta))} ${word})`,
+            ));
+          } else if (ps) {
+            card.appendChild(el('div', { class: 'muted' }, `vs last: avg ${fmtDuration(ps.avg)} (same)`));
+          }
+        }
+
+        // Per-round splits
+        const rounds = el('div', { class: 'col' });
+        sec.completedRounds.forEach((r, i) => {
+          const dur = r.endedAt - r.startedAt;
+          const repsStr = r.exercises.map(e => `${e.name}: ${e.skipped ? 'Skipped' : resultDescription(e)}`).join(', ');
+          rounds.appendChild(el('div', { class: 'set-row done' }, [
+            el('div', { class: 'label' }, `${i + 1}`),
+            el('div', { class: 'mono', style: 'text-align:left; grid-column: span 2;' }, repsStr),
+            el('div', { class: 'pill' }, fmtDuration(dur)),
+          ]));
+        });
+        card.appendChild(rounds);
+
+        // Totals
+        const totalsByEx = {};
+        for (const r of sec.completedRounds) {
+          for (const ex of r.exercises) {
+            if (ex.reps == null) continue;
+            totalsByEx[ex.name] = (totalsByEx[ex.name] || 0) + (ex.reps || 0);
+          }
+        }
+        if (Object.keys(totalsByEx).length) card.appendChild(el('div', { class: 'muted', style: 'margin-top: 6px;' }, 'Recorded reps'));
+        const totals = el('div', { class: 'col' });
+        for (const [name, reps] of Object.entries(totalsByEx)) {
+          totals.appendChild(el('div', { class: 'set-row done' }, [
+            el('div', { class: 'label' }, '∑'),
+            el('div', { class: 'mono', style: 'text-align:left; grid-column: span 2;' }, name),
+            el('div', { class: 'pill' }, `${reps} reps`),
+          ]));
+        }
+        card.appendChild(totals);
+      } else if (sec.type === 'exercise') {
+        const list = el('div', { class: 'col' });
+        sec.completedSets.forEach((s, si) => {
+          list.appendChild(el('div', { class: 'set-row done' }, [
+            el('div', { class: 'label' }, `${si + 1}`),
+            el('div', { class: 'mono' }, resultDescription(s)),
+            el('div', { class: 'mono' }, s.weight != null ? `${s.weight} lb` : ''),
+            el('div', { class: 'pill' }, s.endedAt && s.startedAt ? fmtDuration(s.endedAt - s.startedAt) : '–'),
+          ]));
+        });
+        card.appendChild(list);
+      } else if (TIMER_SECTION_TYPES.includes(sec.type)) {
+        const dm = sec.timerEndedAt && sec.timerStartedAt ? sec.timerEndedAt - sec.timerStartedAt : null;
+        if (sec.trackingValues && Object.keys(sec.trackingValues).length) card.appendChild(el('p', {}, resultDescription(sec)));
+        const showLoggedMins = sec.actualMinutes != null && sec.actualMinutes > 0;
+        const showLoggedMiles = sec.actualMiles != null && sec.actualMiles > 0;
+        card.appendChild(el('div', { class: 'col' }, [
+          el('div', { class: 'muted' }, `Elapsed: ${fmtDuration(dm)}`),
+          showLoggedMins ? el('div', { class: 'muted' }, `Logged: ${sec.actualMinutes} min`) : null,
+          showLoggedMiles ? el('div', { class: 'muted' }, `Distance: ${sec.actualMiles} mi`) : null,
         ]));
       }
-      root.appendChild(list);
-    }
-  },
-
-  paste(root) {
-    root.appendChild(el('div', { class: 'header' }, [
-      el('button', { class: 'icon ghost', on: { click: () => go('home') } }, '← Back'),
-      el('div', { class: 'title' }, [el('h1', {}, 'Paste plan')]),
-    ]));
-
-    root.appendChild(el('p', { class: 'muted' }, 'Have ChatGPT build a training plan — copy the prompt, paste into ChatGPT, then paste its JSON output below.'));
-    root.appendChild(el('button', { class: 'ghost', on: { click: () => copyChatGPTPrompt() } }, '📋 Copy ChatGPT prompt'));
-
-    root.appendChild(el('p', { class: 'muted' }, 'Or paste plan JSON directly.'));
-
-    const ta = el('textarea', {
-      placeholder: 'Paste the full plan JSON here…',
-      spellcheck: 'false',
-      autocapitalize: 'off',
-      autocorrect: 'off',
+      root.appendChild(card);
     });
-    ta.value = state.pasteText;
-    ta.addEventListener('input', () => { state.pasteText = ta.value; });
-    root.appendChild(ta);
+}
 
-    if (state.pasteError) root.appendChild(el('div', { class: 'error' }, state.pasteError));
-
-    root.appendChild(el('div', { class: 'row' }, [
-      el('button', { class: 'ghost', on: { click: () => { state.pasteText = ''; state.pasteError = ''; render(); } } }, 'Clear'),
-      el('button', { class: 'primary', on: { click: () => savePaste() } }, 'Save'),
+const views = {
+  home(root) {
+    pageHeader(root, 'Today');
+    const activeGoals = state.goals.filter(g => g.active);
+    root.appendChild(el('div', { class: 'card hero' }, [
+      el('div', { class: 'eyebrow' }, 'Your next step'),
+      el('h2', {}, 'A workout that meets you here.'),
+      el('p', {}, `${activeGoals.length} active goal${activeGoals.length === 1 ? '' : 's'} · ${state.workouts.length} sessions to learn from`),
+      state.active
+        ? el('button', { class: 'primary', on: { click: () => go('session') } }, 'Resume workout')
+        : el('button', { class: 'primary', on: { click: () => go('today') } }, "I'm working out today"),
+      !activeGoals.length ? el('button', { class: 'ghost', on: { click: () => go('goals') } }, 'Add your first goal') : null,
+    ]));
+    if (state.draft && !state.active) root.appendChild(el('div', { class: 'card' }, [
+      el('div', { class: 'muted' }, `Suggested ${fmtDate(state.draft.createdAt)}`),
+      el('h2', {}, state.draft.day.name),
+      el('button', { class: 'ghost', on: { click: () => go('today') } }, 'Review suggestion'),
+    ]));
+    root.appendChild(el('div', { class: 'spread' }, [el('h2', {}, 'Active goals'), el('button', { class: 'ghost', on: { click: () => go('goals') } }, 'Manage goals')]));
+    if (!activeGoals.length) root.appendChild(el('p', {}, 'What would you like to work toward? Add any number of goals, and change them whenever you need.'));
+    activeGoals.forEach(g => root.appendChild(el('div', { class: 'card' }, [el('h3', {}, g.title), g.details ? el('p', {}, g.details) : null])));
+    const last = lastExportAt();
+    if (state.workouts.length && (!last || Date.now() - last >= 7 * 86400000)) root.appendChild(el('div', { class: 'card backup-card' }, [
+      el('h3', {}, 'Keep your progress safe'),
+      el('p', {}, 'Your goals and history are saved on this device. Download a backup to keep or combine with another device.'),
+      el('button', { class: 'ghost', on: { click: exportData } }, 'Download backup'),
+    ]));
+    if (state.workouts[0]) root.appendChild(el('div', { class: 'card' }, [
+      el('div', { class: 'eyebrow' }, 'Last session'),
+      el('h3', {}, state.workouts[0].day.name),
+      el('p', {}, fmtDate(state.workouts[0].startedAt)),
+      el('button', { class: 'ghost', on: { click: () => go('history', { expandedWorkoutId: state.workouts[0].id }) } }, 'View session'),
     ]));
   },
 
-  plan(root) {
-    const plan = state.plans.find(p => p.id === state.selectedPlanId);
-    if (!plan) { go('home'); return; }
-
-    root.appendChild(el('div', { class: 'header' }, [
-      el('button', { class: 'icon ghost', on: { click: () => go('home') } }, '← Back'),
-      el('div', { class: 'title' }, [
-        el('h1', {}, plan.name),
-        el('div', { class: 'muted' }, `${plan.duration_weeks} weeks · ${plan.days.length} days/week`),
-      ]),
-    ]));
-
-    // Progress card
-    const planSessions = state.workouts.filter(w => w.planId === plan.id).sort((a, b) => a.startedAt - b.startedAt);
-    const totalSessions = plan.duration_weeks * plan.days.length;
-    const doneSessions = planSessions.length;
-    const pct = Math.min(100, Math.round((doneSessions / totalSessions) * 100));
-    const currentWeek = Math.min(plan.duration_weeks, Math.floor(doneSessions / plan.days.length) + 1);
-    root.appendChild(el('div', { class: 'card' }, [
-      el('div', { class: 'spread' }, [
-        el('div', { class: 'muted' }, `Week ${currentWeek} of ${plan.duration_weeks}`),
-        el('div', { class: 'muted mono' }, `${doneSessions} / ${totalSessions} · ${pct}%`),
-      ]),
-      el('div', { class: 'progress' }, [el('div', { class: 'progress-fill', style: `width: ${pct}%` })]),
-    ]));
-
-    if (state.active && state.active.planId === plan.id) {
-      root.appendChild(el('div', { class: 'card current tap', on: { click: () => go('session') } }, [
-        el('div', { class: 'muted' }, 'In progress'),
-        el('div', { class: 'exercise-name' }, state.active.day.name),
-        el('div', { class: 'muted' }, 'Tap to resume'),
-      ]));
-    }
-
-    const suggestedIdx = suggestedNextDayIdx(plan);
-
-    const list = el('div', { class: 'list' });
-    plan.days.forEach((d, idx) => {
-      const isSuggested = idx === suggestedIdx && !(state.active && state.active.planId === plan.id);
-      const dayCount = planSessions.filter(s => s.dayIndex === idx).length;
-      const card = el('div', { class: 'card tap' + (isSuggested ? ' current' : ''), on: { click: () => startDay(plan, idx) } }, [
-        el('div', { class: 'spread' }, [
-          el('div', {}, [
-            el('div', { class: 'exercise-name' }, `Day ${d.day}: ${d.name}`),
-            el('div', { class: 'target' }, daySummary(d)),
-          ]),
-          el('div', { class: 'row tight', style: 'flex: 0;' }, [
-            isSuggested ? el('span', { class: 'pill accent' }, 'next') : null,
-            dayCount > 0 ? el('span', { class: 'pill' }, `${dayCount}×`) : null,
-            el('span', { class: 'pill' }, d.type),
-          ]),
+  goals(root) {
+    pageHeader(root, 'Goals');
+    root.appendChild(el('p', {}, 'Choose what matters to you. Only active goals shape new workout suggestions.'));
+    const editing = state.goals.find(g => g.id === state.goalEditing);
+    const form = el('form', { class: 'card' });
+    form.appendChild(el('h2', {}, editing ? 'Edit goal' : 'Add a goal'));
+    const title = field(form, 'Goal', { placeholder: 'e.g. Build up to 10 strict pull-ups', required: true, maxlength: 200 }, editing?.title || '');
+    const details = field(form, 'Details (optional)', { placeholder: 'Your starting point, target, or timing', maxlength: 2000 }, editing?.details || '', true);
+    if (state.goalError) form.appendChild(el('div', { class: 'error', role: 'alert' }, state.goalError));
+    form.appendChild(el('button', { type: 'submit', class: 'primary' }, editing ? 'Save goal' : 'Add goal'));
+    if (editing) form.appendChild(el('button', { type: 'button', class: 'ghost', on: { click: () => { state.goalEditing = null; state.goalError = ''; render(); } } }, 'Cancel edit'));
+    form.addEventListener('submit', async e => {
+      e.preventDefault();
+      if (!title.value.trim()) { title.focus(); return; }
+      try {
+        await db.saveGoal({ ...(editing || { id: uid(), createdAt: now(), active: true }), title: title.value.trim(), details: details.value.trim(), updatedAt: now() });
+        state.goals = await db.listGoals();
+        state.goalEditing = null; state.goalError = ''; render();
+      } catch { state.goalError = 'Could not save your goal. Please try again.'; render(); }
+    });
+    root.appendChild(form);
+    for (const active of [true, false]) {
+      const goals = state.goals.filter(g => !!g.active === active);
+      if (!goals.length) continue;
+      root.appendChild(el('h2', {}, active ? 'Active' : 'Deactivated'));
+      goals.forEach(g => root.appendChild(el('div', { class: 'card' + (!active ? ' inactive-goal' : '') }, [
+        el('h3', {}, g.title), g.details ? el('p', {}, g.details) : null,
+        el('div', { class: 'row' }, [
+          el('button', { class: 'ghost', on: { click: () => { state.goalEditing = g.id; state.goalError = ''; render(); } } }, 'Edit'),
+          el('button', { class: 'ghost', 'aria-label': `${active ? 'Deactivate' : 'Reactivate'} ${g.title}`, on: { click: async () => {
+            try { await db.saveGoal({ ...g, active: !active, updatedAt: now() }); state.goals = await db.listGoals(); render(); }
+            catch { toast('Could not update goal. Please try again.'); }
+          } } }, active ? 'Deactivate' : 'Reactivate'),
         ]),
-        d.notes ? el('div', { class: 'muted' }, d.notes) : null,
-      ]);
-      if (d.type !== 'rest') {
-        renderHistoryChart(card, dayHistory(plan.id, idx), 'time', 'Total time — history');
-      }
-      list.appendChild(card);
+      ])));
+    }
+  },
+
+  today(root) {
+    pageHeader(root, "Today's workout");
+    if (state.active) {
+      root.appendChild(el('div', { class: 'card' }, [el('p', {}, 'You have a workout in progress.'), el('button', { class: 'primary', on: { click: () => go('session') } }, 'Resume workout')]));
+      return;
+    }
+    const activeGoals = state.goals.filter(g => g.active);
+    const form = el('form', { class: 'card' });
+    form.appendChild(el('h2', {}, 'What works for you today?'));
+    const minutes = field(form, 'Time available (minutes)', { type: 'number', min: 5, max: 180, required: true }, state.today.minutes);
+    const equipment = field(form, 'Available equipment', { placeholder: 'e.g. Pull-up bar, 20 lb vest, or bodyweight only', maxlength: 2000 }, state.today.equipment);
+    const limitations = field(form, 'Limitations or movements to avoid', { placeholder: 'Anything the workout should account for', maxlength: 2000 }, state.today.limitations, true);
+    const feeling = field(form, 'How are you feeling? (optional)', { placeholder: 'Energy, soreness, or anything different today', maxlength: 2000 }, state.today.feeling, true);
+    for (const [key, input] of Object.entries({ minutes, equipment, limitations, feeling })) input.addEventListener('input', () => {
+      state.today[key] = input.value; localStorage.setItem('wt.today', JSON.stringify(state.today));
     });
-    root.appendChild(list);
+    form.appendChild(el('p', { class: 'muted' }, `Uses your ${activeGoals.length} active goals, today's details, and all ${state.workouts.length} saved sessions with OpenAI to suggest one workout.`));
+    if (!activeGoals.length) form.appendChild(el('button', { type: 'button', class: 'ghost', on: { click: () => go('goals') } }, 'Add an active goal first'));
+    if (state.aiReady === false) form.appendChild(el('div', { class: 'notice' }, 'AI is not connected yet. The app server needs an OpenAI API key before it can suggest a workout. Your goals and history are ready.'));
+    if (state.generationError) form.appendChild(el('div', { class: 'error', role: 'alert' }, state.generationError));
+    form.appendChild(el('button', { type: 'submit', class: 'primary', disabled: state.generating || !activeGoals.length }, state.generating ? 'Creating your workout…' : state.draft ? 'Suggest a different workout' : 'Suggest my workout'));
+    if (state.generating && !state.revising) form.appendChild(el('p', { role: 'status' }, 'Reviewing your goals, past sessions, and recovery…'));
+    form.addEventListener('submit', e => { e.preventDefault(); generateWorkout(); });
+    if (state.draft) {
+      form.classList.remove('card');
+      root.appendChild(disclosure("Today's setup", `${state.today.minutes} min${state.today.equipment ? ` · ${state.today.equipment}` : ''}`, [form], 'card setup-disclosure', !!state.generationError || (state.generating && !state.revising)));
+    } else root.appendChild(form);
+    if (state.draft) {
+      const d = state.draft;
+      root.appendChild(disclosure(d.day.name, `${d.today?.minutes || state.today.minutes} min · ${d.day.sections.length} sections`, workoutDetails(d.day, d.rationale, d.goals), 'card current workout-overview'));
+      const sections = el('div', { class: 'workout-list' });
+      d.day.sections.forEach(section => sections.appendChild(disclosure(sectionTitle(section), sectionPrescription(section), sectionDetails(section), 'card exercise-disclosure')));
+      root.appendChild(sections);
+      if (draftGoalsChanged()) root.appendChild(el('p', { class: 'notice' }, 'Your active goals changed. Suggest a new workout to use your current goals.'));
+      root.appendChild(el('button', { class: 'primary', disabled: state.generating || draftGoalsChanged(), on: { click: startDailyWorkout } }, 'Start this workout'));
+      root.appendChild(el('button', { class: 'ghost', disabled: state.generating, on: { click: () => { state.draft = null; state.feedback = ''; state.revisionError = ''; localStorage.removeItem('wt.draft'); localStorage.removeItem('wt.feedback'); render(); } } }, 'Discard suggestion'));
+      const chat = el('form', { class: 'card workout-chat', 'aria-label': 'Adjust workout' });
+      chat.appendChild(el('h2', {}, 'Make it yours'));
+      if (d.conversation?.length) {
+        const messageList = items => el('div', { class: 'chat-messages', 'aria-label': 'Workout conversation' }, items.map(message => el('div', { class: `chat-message ${message.role}` }, [el('div', { class: 'eyebrow' }, message.role === 'user' ? 'You' : 'Coach'), el('p', {}, message.content)])));
+        if (d.conversation.length > 2) chat.appendChild(disclosure('Earlier changes', `${d.conversation.length / 2 - 1} requests`, [messageList(d.conversation.slice(0, -2))]));
+        chat.appendChild(messageList(d.conversation.slice(-2)));
+      }
+      const feedbackInput = field(chat, 'What would you like to change?', { placeholder: 'Swap an exercise, give me only five exercises, make it easier…', maxlength: 4000, required: true }, state.feedback, true);
+      feedbackInput.disabled = state.revising;
+      feedbackInput.addEventListener('input', () => { state.feedback = feedbackInput.value; localStorage.setItem('wt.feedback', JSON.stringify(state.feedback)); });
+      if (state.revisionError) chat.appendChild(el('div', { class: 'error', role: 'alert' }, state.revisionError));
+      if (state.revising) chat.appendChild(el('p', { role: 'status' }, 'Updating your workout…'));
+      chat.appendChild(el('button', { type: 'submit', class: 'primary', disabled: state.generating || !activeGoals.length }, state.revising ? 'Updating…' : 'Update workout'));
+      chat.addEventListener('submit', e => {
+        e.preventDefault();
+        const feedback = feedbackInput.value.trim();
+        if (feedback && !state.generating) generateWorkout(feedback);
+      });
+      root.appendChild(chat);
+    }
   },
 
   session(root) {
@@ -450,7 +782,7 @@ const views = {
       el('div', { class: 'title' }, [
         el('h1', {}, a.day.name),
         el('div', { class: 'muted' }, [
-          el('span', {}, `${a.planName} · `),
+          el('span', {}, 'Elapsed · '),
           el('span', { class: 'timer', id: 'wktimer' }, '0:00'),
         ]),
       ]),
@@ -458,16 +790,17 @@ const views = {
     ]));
 
     if (a.day.type === 'rest') {
-      if (a.day.notes) root.appendChild(el('div', { class: 'card' }, [el('div', { class: 'muted' }, a.day.notes)]));
+      if (a.day.notes || a.rationale) root.appendChild(disclosure('About today', a.day.summary || '', workoutDetails(a.day, a.rationale, a.goals), 'card'));
       root.appendChild(el('div', { class: 'card current' }, [
         el('div', { class: 'exercise-name' }, 'Rest day'),
         el('div', { class: 'muted' }, 'No work today. Mark complete when you\'re done resting (or skip entirely).'),
-        el('button', { class: 'primary', on: { click: () => finishSession() } }, 'Mark rest day complete'),
+        el('button', { class: 'primary', disabled: state.finishing, on: { click: () => finishSession() } }, 'Mark rest day complete'),
       ]));
       startWorkoutTimer();
       return;
     }
 
+    if (state.finishError) root.appendChild(el('p', { class: 'error', role: 'alert' }, state.finishError));
     const allDone = a.sections.every(isSectionComplete);
     if (allDone) {
       const notesTa = el('textarea', {
@@ -479,26 +812,22 @@ const views = {
       root.appendChild(el('div', { class: 'card current' }, [
         el('div', { class: 'exercise-name' }, '🎉 Session complete'),
         notesTa,
-        el('button', { class: 'primary', on: { click: () => finishSession() } }, 'Finish session'),
+        el('button', { class: 'primary', disabled: state.finishing, on: { click: () => finishSession() } }, 'Finish session'),
       ]));
     }
 
-    if (a.day.notes) root.appendChild(el('div', { class: 'card' }, [el('div', { class: 'muted' }, a.day.notes)]));
+    if (a.day.notes || a.rationale) root.appendChild(disclosure('About today', a.day.summary || '', workoutDetails(a.day, a.rationale, a.goals), 'card'));
 
     a.sections.forEach((sec, si) => {
       const isCurrent = si === a.currentSectionIdx;
       const isDone = isSectionComplete(sec);
 
       const card = el('div', { class: 'card' + (isCurrent && !isDone ? ' current' : '') });
-      card.appendChild(el('div', { class: 'spread' }, [
-        el('div', {}, [
-          el('div', { class: 'exercise-name' }, sec.name),
-          el('div', { class: 'target' }, sectionSummary(sec)),
-        ]),
-        el('span', { class: 'pill' }, sec.type),
-      ]));
-
-      renderSectionHistoryChart(card, a.planId, a.dayIndex, si, sec);
+      const info = sectionDetails(sec);
+      const chart = el('div', {});
+      renderSectionHistoryChart(chart, a.planId, a.dayIndex, si, sec);
+      if (chart.childNodes.length) info.push(chart);
+      card.appendChild(disclosure(sectionTitle(sec), sectionPrescription(sec), info));
 
       if (isDone) {
         card.classList.add('done-section');
@@ -523,13 +852,123 @@ const views = {
     maybeScrollToCurrent(root);
   },
 
+  exercises(root) {
+    pageHeader(root, 'Exercise library');
+    root.appendChild(el('button', { class: 'ghost', on: { click: () => go('progress') } }, 'Back to progress'));
+    root.appendChild(el('p', {}, 'A shared list for workouts and progress. Targets and weights can change while the exercise stays the same.'));
+    const form = el('form', { class: 'card' }, [el('h2', {}, 'Add an exercise')]);
+    const name = field(form, 'Exercise name', { required: true, maxlength: 300, placeholder: 'e.g. Tuck front lever' }, '');
+    const instructions = field(form, 'Technique instructions (setup, movement, key cues)', { required: true, minlength: 40, maxlength: 4000 }, '', true);
+    const id = `field-${++fieldId}`;
+    const measurement = el('select', { id }, [['reps', 'Reps and load'], ['hold', 'Hold duration'], ['distance', 'Distance and time'], ['time', 'Time']].map(([value, label]) => el('option', { value }, label)));
+    form.appendChild(el('div', { class: 'field' }, [el('label', { for: id }, 'Track by'), measurement]));
+    if (state.exerciseError) form.appendChild(el('p', { class: 'error', role: 'alert' }, state.exerciseError));
+    form.appendChild(el('button', { type: 'submit', class: 'primary' }, 'Create exercise'));
+    form.addEventListener('submit', async event => {
+      event.preventDefault();
+      try {
+        if (findExercise(state.exercises, null, name.value)) throw new Error('This exercise is already in your library. Use the existing exercise.');
+        await db.saveExercise(createExercise({ name: name.value, instructions: instructions.value, measurement: measurement.value }));
+        state.exercises = await db.listExercises(); state.exerciseError = ''; render();
+      } catch (error) { state.exerciseError = error.message; render(); }
+    });
+    root.appendChild(disclosure('Create an exercise', '', [form]));
+    const history = exerciseProgress(state.workouts, state.exercises);
+    for (const exercise of [...state.exercises].sort((a, b) => a.name.localeCompare(b.name))) {
+      const recorded = history.find(e => e.exerciseId === exercise.id);
+      root.appendChild(disclosure(exercise.name, `${recorded?.entries.length || 0} recorded sessions · ${exercise.measurement}`, [
+        el('p', {}, exercise.instructions || 'Technique instructions are supplied with each workout.'),
+        exercise.aliases.length ? el('p', { class: 'muted' }, `Also recorded as: ${exercise.aliases.join(' · ')}`) : null,
+        recorded ? el('button', { class: 'ghost', on: { click: () => { state.progressExercise = exercise.id; state.progressLoad = 'all'; go('progress'); } } }, 'View exercise progress') : null,
+      ], 'card'));
+    }
+  },
+
+  progress(root) {
+    pageHeader(root, 'Progress');
+    root.appendChild(el('button', { class: 'ghost', on: { click: () => go('exercises') } }, 'Exercise library'));
+    if (!state.workouts.length) {
+      root.appendChild(el('div', { class: 'card' }, [el('h2', {}, 'Your progress starts here'), el('p', {}, 'Finish a workout to get a coach review and start building your charts.')]));
+      return;
+    }
+    const workout = state.workouts.find(w => w.id === state.progressWorkoutId) || state.workouts[0];
+    const selectId = `field-${++fieldId}`;
+    const select = el('select', { id: selectId }, state.workouts.map(w => el('option', { value: w.id, selected: w.id === workout.id }, `${fmtDate(w.startedAt)} · ${w.day.name}`)));
+    select.addEventListener('change', () => { state.progressWorkoutId = select.value; render(); });
+    root.appendChild(el('div', { class: 'field' }, [el('label', { for: selectId }, 'Session'), select]));
+    const review = workout.progressReview;
+    const coach = el('div', { class: 'card current progress-coach' }, [el('div', { class: 'spread' }, [el('div', { class: 'eyebrow' }, "Coach's take"), el('button', { class: 'icon ghost coach-refresh', 'aria-label': "Refresh coach's take", title: "Refresh coach's take", disabled: state.reviewing.has(workout.id), on: { click: () => reviewCompletedWorkout(workout.id, true) } }, '↻')]), el('h2', {}, workout.day.name)]);
+    if (review) {
+      if (state.reviewing.has(workout.id)) coach.appendChild(el('p', { role: 'status' }, 'Refreshing your progress review…'));
+      if (state.reviewErrors[workout.id]) coach.appendChild(el('p', { class: 'error', role: 'alert' }, state.reviewErrors[workout.id]));
+      if (state.workouts.some(w => w.resultsUpdatedAt > review.createdAt)) coach.appendChild(el('p', { class: 'muted' }, 'Results have changed since this review. Refresh for an updated take.'));
+      coach.appendChild(el('p', { class: 'coach-summary' }, review.summary));
+      coach.appendChild(el('ul', { class: 'coach-observations' }, review.observations.map(item => el('li', {}, item))));
+      coach.appendChild(el('div', { class: 'detail-group' }, [el('h3', {}, 'Next step'), el('p', {}, review.nextStep)]));
+    } else if (state.reviewing.has(workout.id)) {
+      coach.appendChild(el('p', { role: 'status' }, 'Reviewing this session alongside your full workout history…'));
+    } else {
+      if (state.reviewErrors[workout.id] || workout.progressReviewStatus === 'error') coach.appendChild(el('p', { class: 'error', role: 'alert' }, state.reviewErrors[workout.id] || 'The review could not finish. Your workout is saved.'));
+      else coach.appendChild(el('p', {}, 'Get a review of this session in the context of your goals and full history. New workouts are reviewed automatically when you finish.'));
+      coach.appendChild(el('button', { class: 'primary', on: { click: () => reviewCompletedWorkout(workout.id) } }, workout.progressReviewStatus === 'error' ? 'Retry progress review' : 'Review this session'));
+    }
+    root.appendChild(coach);
+    const latestMetrics = workoutMetrics(workout);
+    root.appendChild(el('div', { class: 'card' }, [el('div', { class: 'spread' }, [el('span', {}, 'This session'), el('span', { class: 'mono' }, `${latestMetrics.reps} logged reps · ${fmtDuration(workoutDuration(workout))}`)]), el('button', { class: 'ghost', on: { click: () => go('history', { expandedWorkoutId: workout.id }) } }, 'View or correct results')]));
+    const exercises = exerciseProgress(state.workouts, state.exercises);
+    if (exercises.length) {
+      const ex = exercises.find(e => e.key === state.progressExercise) || exercises[0];
+      const controls = el('div', { class: 'card' }, [el('h2', {}, 'Exercise progress')]);
+      const exerciseId = `field-${++fieldId}`, metricId = `field-${++fieldId}`, loadId = `field-${++fieldId}`;
+      const exerciseSelect = el('select', { id: exerciseId }, exercises.map(item => el('option', { value: item.key, selected: item.key === ex.key }, item.name)));
+      exerciseSelect.addEventListener('change', () => { state.progressExercise = exerciseSelect.value; state.progressLoad = 'all'; state.progressMetric = ''; render(); });
+      const measures = ex.measurement === 'hold' ? [['holdSeconds', 'Best recorded hold (seconds)'], ['weight', 'Heaviest logged load (lb)']] : ex.measurement === 'distance' ? [['miles', 'Distance (miles)'], ['minutes', 'Recorded minutes']] : ex.measurement === 'time' ? [['minutes', 'Recorded minutes']] : [['bestSetReps', 'Best set (reps)'], ['reps', 'Total logged reps'], ['weight', 'Heaviest logged load (lb)']];
+      const metric = measures.some(([key]) => key === state.progressMetric) ? state.progressMetric : measures[0][0];
+      const metricSelect = el('select', { id: metricId }, measures.map(([value, name]) => el('option', { value, selected: value === metric }, name)));
+      metricSelect.addEventListener('change', () => { state.progressMetric = metricSelect.value; render(); });
+      controls.appendChild(el('div', { class: 'field' }, [el('label', { for: exerciseId }, 'Exercise'), exerciseSelect]));
+      controls.appendChild(el('div', { class: 'field' }, [el('label', { for: metricId }, 'Measure'), metricSelect]));
+      const loads = [...new Set(ex.entries.flatMap(e => e.performances.map(p => p.weight).filter(Number.isFinite)))].sort((a, b) => a - b);
+      if (loads.length > 1 && ['reps', 'hold'].includes(ex.measurement)) {
+        const loadSelect = el('select', { id: loadId }, [el('option', { value: 'all', selected: state.progressLoad === 'all' }, 'All loads'), ...loads.map(load => el('option', { value: String(load), selected: state.progressLoad === String(load) }, load ? `${load} lb sets` : 'Bodyweight sets'))]);
+        loadSelect.addEventListener('change', () => { state.progressLoad = loadSelect.value; render(); });
+        controls.appendChild(el('div', { class: 'field' }, [el('label', { for: loadId }, 'Compare at load'), loadSelect]));
+      }
+      const entries = ex.entries.map(e => exerciseAtLoad(e, state.progressLoad)).filter(Boolean);
+      controls.appendChild(el('p', { class: 'muted' }, 'Best sets and holds show performance; total reps show workload. Check load, circuit/sets, and workout position before comparing.'));
+      controls.appendChild(el('p', { class: 'muted' }, `${ex.entries.length} recorded sessions · ${fmtDate(ex.entries[0].when)} to ${fmtDate(ex.entries.at(-1).when)}`));
+      root.appendChild(controls);
+      const measured = entries.filter(e => e[metric] != null);
+      if (measured.length) root.appendChild(progressChart(ex.name, `${measures.find(([key]) => key === metric)[1]} · latest 12 sessions`, measured.slice(-12), metric, metric === 'weight' ? 'Pounds' : metric === 'holdSeconds' ? 'Seconds' : metric === 'minutes' ? 'Minutes' : metric === 'miles' ? 'Miles' : 'Reps'));
+      else root.appendChild(el('p', { class: 'notice' }, 'No measurements recorded for this selection. Completion is preserved; targets are not treated as measured results.'));
+      const history = el('div', { class: 'card' }, [el('h2', {}, `Every time you did ${ex.name}`)]);
+      for (const entry of [...entries].reverse()) history.appendChild(disclosure(fmtDate(entry.when), `${entry.sets} completed sets/rounds${entry.reps != null ? ` · ${entry.reps} reps` : ''}${entry.weight ? ` · ${entry.weight} lb` : ''}${entry.holdSeconds != null ? ` · best hold ${entry.holdSeconds}s` : ''}${entry.miles ? ` · ${entry.miles} mi` : ''}`, [
+        el('p', {}, entry.workoutName),
+        el('p', { class: 'muted' }, `${entry.formats.join(' / ')} · workout block ${entry.positions.join(', ')}`),
+        el('p', { class: 'muted' }, ex.measurement === 'hold' && entry.holdSeconds == null ? 'Hold duration was not recorded for this session.' : `${entry.bestSetReps != null ? `Best set: ${entry.bestSetReps} reps` : 'Completion recorded'}${entry.minutes ? ` · ${Number(entry.minutes.toFixed(1))} min` : ''}`),
+        el('button', { class: 'ghost', on: { click: () => go('history', { expandedWorkoutId: entry.workoutId }) } }, 'View full session'),
+      ]));
+      root.appendChild(history);
+    }
+    const overall = el('div', { class: 'col' });
+    const weeks = weeklyProgress(state.workouts);
+    overall.appendChild(progressChart('Consistency', 'Training sessions per week · last 8 weeks. Rest days are excluded.', weeks, 'sessions', 'Sessions'));
+    overall.appendChild(progressChart('Training volume', 'Actual logged reps per week · last 8 weeks.', weeks, 'reps', 'Reps'));
+    overall.appendChild(progressChart('Training time', 'Recorded session minutes per week. Spans over 6 hours are excluded as possible forgotten timers.', weeks, 'minutes', 'Minutes'));
+    const excluded = weeks.reduce((sum, w) => sum + w.unusualDurations, 0);
+    if (excluded) overall.appendChild(el('p', { class: 'muted' }, `${excluded} unusually long session${excluded === 1 ? '' : 's'} excluded from the time chart. Original history is preserved.`));
+    root.appendChild(disclosure('Overall training', 'Weekly consistency, volume and time', [overall], 'card'));
+
+  },
+
   history(root) {
-    root.appendChild(el('div', { class: 'header' }, [
-      el('button', { class: 'icon ghost', on: { click: () => go('home') } }, '← Back'),
-      el('div', { class: 'title' }, [el('h1', {}, 'History')]),
-      el('button', { class: 'icon ghost', on: { click: () => importData() } }, 'Import'),
-      el('button', { class: 'icon ghost', on: { click: () => exportData() } }, 'Export'),
+    pageHeader(root, 'History');
+    root.appendChild(el('div', { class: 'row' }, [
+      el('button', { class: 'ghost', on: { click: importData } }, 'Import backup'),
+      el('button', { class: 'ghost', on: { click: exportData } }, 'Export backup'),
     ]));
+
+    root.appendChild(el('p', { class: 'muted' }, 'Import a JSON backup from another device to combine your history. Existing goals and sessions are kept; duplicates are skipped.'));
 
     if (state.workouts.length === 0) {
       root.appendChild(el('div', { class: 'empty' }, 'No completed sessions yet.'));
@@ -563,145 +1002,22 @@ const views = {
 
     const list = el('div', { class: 'list' });
     for (const w of state.workouts) {
-      const dur = w.endedAt ? w.endedAt - w.startedAt : null;
-      list.appendChild(el('div', { class: 'card tap', on: { click: () => go('workoutDetail', { selectedWorkoutId: w.id }) } }, [
-        el('div', { class: 'spread' }, [
-          el('div', { class: 'exercise-name' }, `${w.planName} — ${w.day.name}`),
-          el('div', { class: 'pill' }, fmtDuration(dur)),
-        ]),
-        el('div', { class: 'muted' }, `${fmtDate(w.startedAt)} · ${w.day.type}`),
-      ]));
+      const dur = w.endedAt ? workoutDuration(w) : null;
+      const record = disclosure(w.day.name, `${fmtDate(w.startedAt)} · ${fmtDuration(dur)} · ${w.day.type}`, [], 'card history-entry', w.id === state.expandedWorkoutId);
+      const body = record.querySelector('.disclosure-body');
+      const populate = () => {
+        if (!record.open || body.childNodes.length) return;
+        renderResultCorrection(body, w);
+        renderWorkoutRecord(body, w);
+        body.appendChild(el('button', { class: 'danger', on: { click: () => deleteHistoryEntry(w) } }, 'Delete session'));
+      };
+      record.addEventListener('toggle', populate);
+      populate();
+      list.appendChild(record);
     }
     root.appendChild(list);
   },
 
-  workoutDetail(root) {
-    const w = state.workouts.find(x => x.id === state.selectedWorkoutId);
-    if (!w) { go('history'); return; }
-    const dur = w.endedAt ? w.endedAt - w.startedAt : null;
-
-    root.appendChild(el('div', { class: 'header' }, [
-      el('button', { class: 'icon ghost', on: { click: () => go('history') } }, '← Back'),
-      el('div', { class: 'title' }, [
-        el('h1', {}, `${w.planName} — ${w.day.name}`),
-        el('div', { class: 'muted' }, `${fmtDate(w.startedAt)} · ${fmtDuration(dur)}`),
-      ]),
-      el('button', { class: 'danger', on: { click: () => deleteHistoryEntry(w) } }, 'Delete'),
-    ]));
-
-    if (w.day.notes) root.appendChild(el('div', { class: 'card' }, [el('div', { class: 'muted' }, w.day.notes)]));
-
-    // Last-time comparison banner
-    const prior = findPreviousSession(w);
-    if (prior) {
-      const priorDur = prior.endedAt - prior.startedAt;
-      const delta = (dur || 0) - priorDur;
-      const daysAgo = Math.round((w.startedAt - prior.startedAt) / 86400000);
-      const agoText = daysAgo < 1 ? 'earlier today' : daysAgo === 1 ? '1d ago' : `${daysAgo}d ago`;
-      const deltaText = Math.abs(delta) < 1000
-        ? '(same time)'
-        : `(${delta > 0 ? '+' : '−'}${fmtDuration(Math.abs(delta))} ${delta > 0 ? 'slower' : 'faster'})`;
-      root.appendChild(el('div', { class: 'card' }, [
-        el('div', { class: 'muted' }, `Last time: ${agoText} · ${fmtDuration(priorDur)} ${deltaText}`),
-      ]));
-    }
-
-    if (w.notes && w.notes.trim()) {
-      root.appendChild(el('div', { class: 'card' }, [
-        el('div', { class: 'muted', style: 'font-style: italic;' }, `"${w.notes.trim()}"`),
-      ]));
-    }
-
-    if (w.day.type === 'rest') {
-      root.appendChild(el('div', { class: 'card' }, [el('div', { class: 'muted' }, 'Rest day — marked complete.')]));
-      return;
-    }
-
-    (w.sections || []).forEach((sec, secIdx) => {
-      const card = el('div', { class: 'card' });
-      card.appendChild(el('div', { class: 'spread' }, [
-        el('div', { class: 'exercise-name' }, sec.name),
-        el('span', { class: 'pill' }, sec.type),
-      ]));
-
-      if (sec.type === 'circuit') {
-        const stats = circuitStats(sec);
-        const avg = stats?.avg ?? 0;
-        const fastest = stats?.fastest ?? 0;
-        const slowest = stats?.slowest ?? 0;
-        card.appendChild(el('div', { class: 'muted' },
-          `${sec.completedRounds.length} / ${sec.rounds} rounds · avg ${fmtDuration(avg)} · fastest ${fmtDuration(fastest)} · slowest ${fmtDuration(slowest)}`,
-        ));
-        // Per-section comparison vs last time
-        const priorSec = prior?.sections?.[secIdx];
-        if (priorSec && priorSec.type === 'circuit') {
-          const ps = circuitStats(priorSec);
-          if (ps && Math.abs(avg - ps.avg) >= 1000) {
-            const avgDelta = avg - ps.avg;
-            const sign = avgDelta > 0 ? '+' : '−';
-            const word = avgDelta > 0 ? 'slower' : 'faster';
-            card.appendChild(el('div', { class: 'muted' },
-              `vs last: avg ${fmtDuration(ps.avg)} (${sign}${fmtDuration(Math.abs(avgDelta))} ${word})`,
-            ));
-          } else if (ps) {
-            card.appendChild(el('div', { class: 'muted' }, `vs last: avg ${fmtDuration(ps.avg)} (same)`));
-          }
-        }
-
-        // Per-round splits
-        const rounds = el('div', { class: 'col' });
-        sec.completedRounds.forEach((r, i) => {
-          const dur = r.endedAt - r.startedAt;
-          const repsStr = r.exercises.map(e => `${e.reps} ${e.name}`).join(', ');
-          rounds.appendChild(el('div', { class: 'set-row done' }, [
-            el('div', { class: 'label' }, `${i + 1}`),
-            el('div', { class: 'mono', style: 'text-align:left; grid-column: span 2;' }, repsStr),
-            el('div', { class: 'pill' }, fmtDuration(dur)),
-          ]));
-        });
-        card.appendChild(rounds);
-
-        // Totals
-        const totalsByEx = {};
-        for (const r of sec.completedRounds) {
-          for (const ex of r.exercises) {
-            totalsByEx[ex.name] = (totalsByEx[ex.name] || 0) + (ex.reps || 0);
-          }
-        }
-        card.appendChild(el('div', { class: 'muted', style: 'margin-top: 6px;' }, 'Totals'));
-        const totals = el('div', { class: 'col' });
-        for (const [name, reps] of Object.entries(totalsByEx)) {
-          totals.appendChild(el('div', { class: 'set-row done' }, [
-            el('div', { class: 'label' }, '∑'),
-            el('div', { class: 'mono', style: 'text-align:left; grid-column: span 2;' }, name),
-            el('div', { class: 'pill' }, `${reps} reps`),
-          ]));
-        }
-        card.appendChild(totals);
-      } else if (sec.type === 'exercise') {
-        const list = el('div', { class: 'col' });
-        sec.completedSets.forEach((s, si) => {
-          list.appendChild(el('div', { class: 'set-row done' }, [
-            el('div', { class: 'label' }, `${si + 1}`),
-            el('div', { class: 'mono' }, `${s.reps ?? '–'} reps`),
-            el('div', { class: 'mono' }, `${s.weight ?? 0} lb`),
-            el('div', { class: 'pill' }, s.endedAt && s.startedAt ? fmtDuration(s.endedAt - s.startedAt) : '–'),
-          ]));
-        });
-        card.appendChild(list);
-      } else if (TIMER_SECTION_TYPES.includes(sec.type)) {
-        const dm = sec.timerEndedAt && sec.timerStartedAt ? sec.timerEndedAt - sec.timerStartedAt : null;
-        const showLoggedMins = sec.actualMinutes != null && sec.actualMinutes > 0;
-        const showLoggedMiles = sec.actualMiles != null && sec.actualMiles > 0;
-        card.appendChild(el('div', { class: 'col' }, [
-          el('div', { class: 'muted' }, `Elapsed: ${fmtDuration(dm)}`),
-          showLoggedMins ? el('div', { class: 'muted' }, `Logged: ${sec.actualMinutes} min`) : null,
-          showLoggedMiles ? el('div', { class: 'muted' }, `Distance: ${sec.actualMiles} mi`) : null,
-        ]));
-      }
-      root.appendChild(card);
-    });
-  },
 };
 
 function computeStats(workouts) {
@@ -711,7 +1027,7 @@ function computeStats(workouts) {
   let weekDuration = 0, weekReps = 0;
   const byExercise = {};
   for (const w of weekSessions) {
-    if (w.endedAt) weekDuration += w.endedAt - w.startedAt;
+    if (w.endedAt) weekDuration += workoutDuration(w);
     for (const sec of (w.sections || [])) {
       if (sec.type === 'circuit') {
         for (const r of (sec.completedRounds || [])) {
@@ -731,7 +1047,7 @@ function computeStats(workouts) {
       }
     }
   }
-  const topExercises = Object.entries(byExercise).sort((a, b) => b[1] - a[1]).slice(0, 6);
+  const topExercises = Object.entries(byExercise).filter(([, reps]) => reps > 0).sort((a, b) => b[1] - a[1]).slice(0, 6);
 
   // Streak: count consecutive days back from today/yesterday with at least one session.
   const daySet = new Set();
@@ -747,13 +1063,6 @@ function computeStats(workouts) {
     else if (i > 0) break; // allow today to not be done yet without breaking
   }
   return { weekSessions: weekSessions.length, weekDuration, weekReps, streak, topExercises };
-}
-
-function suggestedNextDayIdx(plan) {
-  const sessions = state.workouts.filter(w => w.planId === plan.id).sort((a, b) => b.startedAt - a.startedAt);
-  if (sessions.length === 0) return 0;
-  const lastIdx = sessions[0].dayIndex;
-  return (lastIdx + 1) % plan.days.length;
 }
 
 // ============================================================
@@ -804,7 +1113,7 @@ function sectionHistory(planId, dayIndex, si, sec) {
   const kind = sectionMetricKind(sec);
   if (!kind) return { kind: null, entries: [] };
   const sessions = state.workouts
-    .filter(w => w.planId === planId && w.dayIndex === dayIndex && w.endedAt)
+    .filter(w => (planId === 'daily' || (w.planId === planId && w.dayIndex === dayIndex)) && w.endedAt)
     .sort((a, b) => a.startedAt - b.startedAt);
   const entries = [];
   for (const w of sessions) {
@@ -890,19 +1199,12 @@ function renderSectionHistoryChart(card, planId, dayIndex, si, sec) {
     kind === 'time' ? 'Time to complete — history' : 'Distance covered — history');
 }
 
-function dayHistory(planId, dayIndex) {
-  return state.workouts
-    .filter(w => w.planId === planId && w.dayIndex === dayIndex && w.startedAt != null && w.endedAt != null)
-    .sort((a, b) => a.startedAt - b.startedAt)
-    .map(w => ({ when: w.startedAt, value: w.endedAt - w.startedAt }))
-    .slice(-8);
-}
-
 function findPreviousSession(w) {
   return state.workouts
     .filter(x => x.id !== w.id
       && x.planId === w.planId
       && x.dayIndex === w.dayIndex
+      && (w.source !== 'ai' || JSON.stringify((w.sections || []).map(s => [s.type, s.name])) === JSON.stringify((x.sections || []).map(s => [s.type, s.name])))
       && x.startedAt < w.startedAt)
     .sort((a, b) => b.startedAt - a.startedAt)[0] || null;
 }
@@ -922,11 +1224,6 @@ function circuitStats(sec) {
 // ============================================================
 // Summaries
 // ============================================================
-
-function daySummary(day) {
-  if (day.type === 'rest') return 'Rest';
-  return day.sections.map(s => sectionSummary(s)).join(' · ');
-}
 
 function sectionSummary(s) {
   if (s.type === 'circuit') {
@@ -952,6 +1249,33 @@ function sectionSummary(s) {
 // ============================================================
 // Section renderers (active session)
 // ============================================================
+
+function exerciseInstructions(ex) {
+  const definition = findExercise(state.exercises, ex.exerciseId, ex.exerciseName || ex.name);
+  const instructions = [...new Set([definition?.instructions, ex.exerciseInstructions || ex.instructions].filter(Boolean))];
+  return disclosure(ex.exerciseName || ex.name, ex.holdSeconds ? `${ex.holdSeconds}s target` : ex.reps ? `${ex.reps} reps target` : 'Instructions', instructions.length ? instructions.map(text => el('p', {}, text)) : [el('p', {}, 'No technique instructions saved for this older exercise.')]);
+}
+
+function resultDescription(result) {
+  if (result.trackingValues) {
+    const values = Object.values(result.trackingValues).map(field => `${field.label}: ${field.value}${field.unit ? ` ${field.unit}` : ''}`);
+    return values.length ? values.join(' · ') : 'Done';
+  }
+  return result.holdSeconds != null ? `${result.holdSeconds}s hold` : result.reps != null ? `${result.reps} reps${result.weight ? ` · ${result.weight} lb` : ''}` : 'Done';
+}
+
+function renderTracking(parent, ex, disabled = false) {
+  const tracking = trackingFor(ex);
+  const inputs = {};
+  for (const field of tracking.fields) {
+    const input = el('input', { type: field.type === 'number' ? 'number' : 'text', min: '0', step: 'any', placeholder: 'Optional', 'aria-label': field.label });
+    input.disabled = disabled;
+    inputs[field.key] = input;
+    parent.appendChild(el('label', { class: 'col' }, [el('span', {}, `${field.label}${field.unit ? ` (${field.unit})` : ''}`), input]));
+  }
+  if (!tracking.fields.length) parent.appendChild(el('p', { class: 'muted' }, 'Completion only · no measurements needed'));
+  return () => trackingResult(tracking, Object.fromEntries(Object.entries(inputs).map(([key, input]) => [key, input.value])));
+}
 
 function renderCircuit(card, sec, si) {
   const roundIdx = sec.completedRounds.length; // next round to do (0-indexed)
@@ -984,27 +1308,19 @@ function renderCircuit(card, sec, si) {
   }
 
   const exList = el('div', { class: 'col' });
-  const repInputs = [];
-  sec.exercises.forEach((ex) => {
-    const repsIn = el('input', { type: 'number', inputmode: 'numeric', value: String(ex.reps), min: '0' });
-    if (!inRound) repsIn.disabled = true;
-    repInputs.push({ ex, input: repsIn });
-    exList.appendChild(el('div', { class: 'set-row' + (inRound ? ' active' : '') }, [
-      el('div', { class: 'label mono' }, `${ex.reps}×`),
-      el('div', { class: 'mono', style: 'text-align:left' }, ex.name),
-      repsIn,
-      el('div', { class: 'pill' }, ex.weight ? `${ex.weight}lb` : 'BW'),
-    ]));
+  const readers = [];
+  sec.exercises.forEach(ex => {
+    const row = el('div', { class: 'card' });
+    row.appendChild(exerciseInstructions(ex));
+    const read = renderTracking(row, ex, !inRound);
+    const skip = el('input', { type: 'checkbox', 'aria-label': `Skip ${ex.name}` });
+    skip.disabled = !inRound;
+    row.appendChild(el('label', { class: 'row' }, [skip, el('span', {}, 'Skip this exercise')]));
+    readers.push(() => ({ name: ex.name, exerciseId: ex.exerciseId, ...(skip.checked ? { skipped: true, completed: false } : read()) }));
+    exList.appendChild(row);
   });
   card.appendChild(exList);
-
-  if (!inRound) {
-    card.appendChild(el('button', { class: 'primary', on: { click: () => startCircuitRound(si) } }, `Start round ${roundIdx + 1}`));
-  } else {
-    card.appendChild(el('button', { class: 'primary', on: {
-      click: () => completeCircuitRound(si, repInputs.map(r => ({ name: r.ex.name, reps: Number(r.input.value) || 0, weight: r.ex.weight }))),
-    } }, `Round ${roundIdx + 1} complete`));
-  }
+  card.appendChild(el('button', { class: 'primary', on: { click: () => inRound ? completeCircuitRound(si, readers.map(read => read())) : startCircuitRound(si) } }, inRound ? `Round ${roundIdx + 1} complete` : `Start round ${roundIdx + 1}`));
 }
 
 function renderExercise(card, sec, si) {
@@ -1015,27 +1331,21 @@ function renderExercise(card, sec, si) {
     // Show completed sets
     ...sec.completedSets.map((s, idx) => el('div', { class: 'set-row done' }, [
       el('div', { class: 'label' }, `${idx + 1}`),
-      el('div', { class: 'mono' }, `${s.reps} reps`),
-      el('div', { class: 'mono' }, `${s.weight} lb`),
+      el('div', { class: 'mono' }, resultDescription(s)),
+      el('div', { class: 'mono' }, s.weight != null ? `${s.weight} lb` : ''),
       el('div', { class: 'pill' }, fmtDuration(s.endedAt - s.startedAt)),
     ])),
   ]));
 
   if (setIdx < sec.sets) {
     if (inSet) {
-      const repsIn = el('input', { type: 'number', inputmode: 'numeric', value: String(sec.reps), min: '0' });
-      const wtIn = el('input', { type: 'number', inputmode: 'decimal', value: String(sec.weight), min: '0', step: '0.5' });
-      card.appendChild(el('div', { class: 'set-row active' }, [
-        el('div', { class: 'label' }, `${setIdx + 1}`),
-        repsIn,
-        wtIn,
-        el('button', { class: 'primary', on: { click: () => completeExerciseSet(si, repsIn.value, wtIn.value) } }, 'Done'),
-      ]));
+      const read = renderTracking(card, sec);
+      card.appendChild(el('button', { class: 'primary', on: { click: () => completeExerciseSet(si, read()) } }, 'Done'));
     } else {
       card.appendChild(el('div', { class: 'set-row' }, [
         el('div', { class: 'label' }, `${setIdx + 1}`),
-        el('div', { class: 'mono muted' }, `${sec.reps}`),
-        el('div', { class: 'mono muted' }, `${sec.weight} lb`),
+        el('div', { class: 'mono muted' }, sec.holdSeconds ? `${sec.holdSeconds}s` : `${sec.reps}`),
+        el('div', { class: 'mono muted' }, sec.weight ? `${sec.weight} lb target` : ''),
         el('button', { class: 'primary', on: { click: () => startExerciseSet(si) } }, 'Start'),
       ]));
     }
@@ -1065,10 +1375,8 @@ function renderCardio(card, sec, si) {
     const elapsedMs = sec.timerEndedAt - sec.timerStartedAt;
     valueNode.textContent = fmtDuration(elapsedMs);
 
-    const minsIn = el('input', { type: 'number', inputmode: 'decimal', step: '0.1', placeholder: 'Actual minutes', value: sec.actualMinutes != null ? String(sec.actualMinutes) : (elapsedMs / 60000).toFixed(1) });
-    const milesIn = el('input', { type: 'number', inputmode: 'decimal', step: '0.01', placeholder: sec.distance_miles ? `Actual miles (target ${sec.distance_miles})` : 'Actual miles', value: sec.actualMiles != null ? String(sec.actualMiles) : '' });
-    card.appendChild(el('div', { class: 'row' }, [minsIn, milesIn]));
-    card.appendChild(el('button', { class: 'primary', on: { click: () => finishCardio(si, minsIn.value, milesIn.value) } }, 'Save & continue'));
+    const read = renderTracking(card, sec);
+    card.appendChild(el('button', { class: 'primary', on: { click: () => finishCardio(si, read()) } }, 'Done & continue'));
   }
 }
 
@@ -1207,107 +1515,6 @@ function stopAllTickers() {
 // Actions
 // ============================================================
 
-const CHATGPT_PROMPT = `You are generating a calisthenics training program for a workout tracker app.
-
-Output MUST be a single valid JSON object and nothing else. No markdown, no explanation, no comments, no trailing commas.
-
-The JSON must follow this exact structure:
-
-{
-  "program_name": string,
-  "duration_weeks": number,
-  "days": [
-    {
-      "day": number,
-      "day_name": string,
-      "type": "workout" | "cardio" | "rest" | "mobility",
-      "notes": string,
-      "sections": [
-        {
-          "section_name": string,
-          "type": "exercise" | "circuit" | "cardio" | "warmup" | "cooldown" | "mobility",
-          "rounds": number,
-          "sets": number,
-          "duration_minutes": number,
-          "distance_miles": number,
-          "interval_seconds": number,
-          "target_intensity": string,
-          "exercises": [
-            {
-              "name": string,
-              "reps": number,
-              "weight": number
-            }
-          ]
-        }
-      ]
-    }
-  ]
-}
-
-Rules:
-- Use "program_name" for the whole plan.
-- Use "day_name" for each day.
-- Use "section_name" for each part of the day.
-- For numeric fields that do not apply, use 0.
-- For text fields that do not apply, use "".
-- For rest days, use "sections": [].
-- "weight" means weighted vest load in pounds only. Use 0 if no vest.
-- Calisthenics only. No dumbbells, barbells, kettlebells, cables, machines, bands, sleds, or medicine balls.
-- Allowed movements include pull-ups, chin-ups, push-ups, dips, bodyweight rows, squats, lunges, split squats, step-ups, pistol squats, glute bridges, calf raises, planks, hollow holds, L-sits, hanging leg raises, knee raises, mountain climbers, burpees, jump squats, handstand holds, handstand push-ups, bridges, dragon flags, and archer/one-arm variations.
-- Cardio sections may include running, walking, elliptical, Peloton, rowing, or stairmaster.
-- If an exercise is a hold, put the duration in the name, like "Hollow hold, 40s hold", and set reps to 0.
-
-Request:
-Create a [INSERT DURATION] calisthenics program for [INSERT GOAL]. Available vest weight: [INSERT WEIGHT] lbs. Include [INSERT PREFERENCES]. Avoid [INSERT LIMITATIONS].`;
-
-async function copyChatGPTPrompt() {
-  try {
-    await navigator.clipboard.writeText(CHATGPT_PROMPT);
-    toast('Prompt copied — paste into ChatGPT');
-  } catch {
-    const ta = document.createElement('textarea');
-    ta.value = CHATGPT_PROMPT;
-    ta.style.position = 'fixed'; ta.style.opacity = '0';
-    document.body.appendChild(ta); ta.select();
-    try { document.execCommand('copy'); toast('Prompt copied — paste into ChatGPT'); }
-    catch { toast('Copy failed — long-press to copy'); }
-    ta.remove();
-  }
-}
-
-async function savePaste() {
-  state.pasteError = '';
-  try {
-    const plan = parsePlan(state.pasteText);
-    await db.savePlan(plan);
-    state.plans = await db.listPlans();
-    state.pasteText = '';
-    go('home');
-    toast('Plan saved');
-  } catch (e) {
-    state.pasteError = e.message || String(e);
-    render();
-  }
-}
-
-async function removePlan(p) {
-  if (!confirm(`Delete plan "${p.name}"?`)) return;
-  await db.deletePlan(p.id);
-  state.plans = await db.listPlans();
-  render();
-}
-
-function startDay(plan, dayIdx) {
-  if (state.active) {
-    if (!confirm('A session is already in progress. Start this one instead? Current progress will be lost.')) return;
-  }
-  state.active = buildActive(plan, dayIdx);
-  saveActive();
-  acquireWakeLock();
-  go('session');
-}
-
 function startCircuitRound(si) {
   ensureAudioCtx();
   armSession();
@@ -1342,12 +1549,12 @@ function startExerciseSet(si) {
   render();
 }
 
-function completeExerciseSet(si, repsVal, weightVal) {
+function completeExerciseSet(si, result) {
   const sec = state.active.sections[si];
   const started = sec.currentSetStartedAt || now();
   sec.completedSets.push({
-    reps: Number(repsVal) || 0,
-    weight: Number(weightVal) || 0,
+    exerciseId: sec.exerciseId,
+    ...result,
     startedAt: started,
     endedAt: now(),
   });
@@ -1377,10 +1584,9 @@ function stopCardio(si) {
   render();
 }
 
-function finishCardio(si, minsVal, milesVal) {
+function finishCardio(si, result) {
   const sec = state.active.sections[si];
-  sec.actualMinutes = minsVal === '' || minsVal == null ? null : Number(minsVal);
-  sec.actualMiles = milesVal === '' || milesVal == null ? null : Number(milesVal);
+  Object.assign(sec, result);
   sec.completed = true;
   saveActive();
   maybeAdvanceSection(si);
@@ -1392,6 +1598,7 @@ function redoSection(si) {
   const sec = state.active.sections[si];
   sec.completed = false;
   sec.skipped = false;
+  delete sec.trackingValues;
   if (sec.type === 'circuit') {
     sec.completedRounds = [];
     sec.currentRoundStartedAt = null;
@@ -1430,20 +1637,25 @@ function maybeAdvanceSection(si) {
 }
 
 async function finishSession() {
-  const a = state.active;
-  if (a.startedAt == null) a.startedAt = now(); // rest day finished without ever arming
-  a.endedAt = now();
-  const record = { ...a };
-  delete record.currentSectionIdx;
-  await db.saveWorkout(record);
-  const newId = record.id;
-  state.workouts = await db.listWorkouts();
-  state.active = null;
-  saveActive();
-  releaseWakeLock();
-  stopAllTickers();
-  go('workoutDetail', { selectedWorkoutId: newId });
-  toast('Session saved');
+  if (state.finishing || !state.active) return;
+  state.finishing = true; state.finishError = ''; render();
+  try {
+    const a = state.active;
+    if (a.startedAt == null) a.startedAt = now();
+    const record = { ...a, endedAt: now(), progressReviewStatus: 'pending' };
+    delete record.currentSectionIdx;
+    await db.saveWorkout(record);
+    state.workouts = await db.listWorkouts();
+    state.active = null;
+    saveActive(); releaseWakeLock(); stopAllTickers();
+    go('progress', { progressWorkoutId: record.id });
+    reviewCompletedWorkout(record.id);
+  } catch {
+    state.finishError = 'Could not save your workout. Your session is still here; please try again.';
+  } finally {
+    state.finishing = false;
+    if (state.view === 'session') render();
+  }
 }
 
 function cancelSession() {
@@ -1471,14 +1683,15 @@ async function importData() {
     if (!file) return;
     try {
       const data = JSON.parse(await file.text());
-      if (!Array.isArray(data.plans) || !Array.isArray(data.workouts)) {
-        throw new Error('Backup needs "plans" and "workouts" arrays.');
-      }
-      for (const p of data.plans) await db.savePlan(p);
-      for (const w of data.workouts) await db.saveWorkout(w);
+      const result = await db.importBackup(data);
+      const catalog = await db.synchronizeExerciseCatalog({ draft: state.draft, active: state.active });
+      state.exercises = catalog.exercises; state.draft = catalog.draft; state.active = catalog.active;
+      if (state.draft) localStorage.setItem('wt.draft', JSON.stringify(state.draft));
+      saveActive();
       state.plans = await db.listPlans();
       state.workouts = await db.listWorkouts();
-      toast(`Imported ${data.plans.length} plans · ${data.workouts.length} sessions`);
+      state.goals = await db.listGoals();
+      alert(`Added ${result.goals} goals and ${result.workouts} sessions. Skipped ${result.skipped} duplicates. Existing history was kept.`);
       render();
     } catch (e) {
       alert('Import failed: ' + (e.message || e));
@@ -1523,15 +1736,27 @@ async function requestPersistence() {
 // ============================================================
 
 async function init() {
+  await requireAccount();
+  if(!isHosted()) {const migration=document.createElement('aside');migration.className='account-bar';migration.append(el('span',{},'Saved on this device'),el('button',{on:{click:exportData}},'Export for another device'));document.body.prepend(migration);}
   requestPersistence(); // best-effort; tells the browser not to evict our data
   state.plans = await db.listPlans();
   state.workouts = await db.listWorkouts();
+  state.goals = await db.listGoals();
+  checkAI();
   state.active = loadActive();
+  const catalog = await db.synchronizeExerciseCatalog({ draft: state.draft, active: state.active });
+  state.exercises = catalog.exercises; state.workouts = catalog.workouts.sort((a, b) => b.startedAt - a.startedAt);
+  state.draft = catalog.draft; state.active = catalog.active;
+  if (state.draft) localStorage.setItem('wt.draft', JSON.stringify(state.draft));
+  saveActive();
   if (state.active) {
     state.view = 'session';
     acquireWakeLock();
   }
+  const pendingReview = state.workouts.find(w => w.progressReviewStatus === 'pending' && !w.progressReview);
+  if (!state.active && pendingReview) { state.view = 'progress'; state.progressWorkoutId = pendingReview.id; }
   render();
+  for (const w of state.workouts.filter(w => w.progressReviewStatus === 'pending' && !w.progressReview)) reviewCompletedWorkout(w.id);
 }
 
-init();
+init().catch(error=>{const root=document.getElementById('app');root.replaceChildren(el('h1',{},'Could not open your workouts'),el('p',{},error.message),el('button',{on:{click:()=>location.reload()}},'Retry'));});
