@@ -8,7 +8,9 @@ import { once } from 'node:events';
 test('local server protects credentials, rejects cross-origin calls and reports setup state', async t => {
   const probe = net.createServer(); probe.listen(0, '127.0.0.1'); await once(probe, 'listening');
   const port = probe.address().port; await new Promise(resolve => probe.close(resolve));
-  const env = { ...process.env, PORT: String(port) }; delete env.OPENAI_API_KEY;
+  const env = { ...process.env, PORT: String(port) };
+  // This test must stay local even when run during a hosted production build.
+  for (const key of ['OPENAI_API_KEY', 'DATABASE_URL', 'PUBLIC_ORIGIN', 'RENDER', 'RENDER_EXTERNAL_URL', 'SETUP_TOKEN']) delete env[key];
   const server = spawn(process.execPath, ['server.mjs'], { cwd: new URL('..', import.meta.url), env, stdio: ['ignore', 'pipe', 'pipe'] });
   t.after(() => server.kill());
   await Promise.race([once(server.stdout, 'data'), once(server, 'exit').then(() => { throw new Error('Server exited'); })]);
