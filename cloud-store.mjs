@@ -6,7 +6,7 @@ export const digest = text => createHash('sha256').update(text).digest('hex');
 export const fail = (status, message) => Object.assign(new Error(message), {status});
 const stores = new Set(['plans', 'workouts', 'goals', 'exercises']);
 export function createCloudStore(connectionString, {secure = true} = {}) {
-  const pool = new pg.Pool({connectionString, max: 5, ...(process.env.DATABASE_SSL === 'true' ? {ssl: {rejectUnauthorized: true}} : {})});
+  const pool = new pg.Pool({connectionString, max: 5, ...(process.env.DATABASE_SSL === 'true' ? {ssl: {rejectUnauthorized: true, ...(process.env.DATABASE_SSL_CA ? {ca: process.env.DATABASE_SSL_CA} : {})}} : {})});
   const ready = pool.query(`
     CREATE TABLE IF NOT EXISTS app_users (id uuid PRIMARY KEY, email text UNIQUE NOT NULL, password_hash text NOT NULL, created_at timestamptz NOT NULL DEFAULT now());
     CREATE TABLE IF NOT EXISTS app_sessions (token_hash text PRIMARY KEY, user_id uuid NOT NULL REFERENCES app_users(id) ON DELETE CASCADE, expires_at timestamptz NOT NULL);

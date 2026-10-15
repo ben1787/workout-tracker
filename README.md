@@ -37,9 +37,24 @@ plans; they do not contain an unfinished session or a workout suggestion.
 
 ## Hosted account on Render
 
-`render.yaml` defines a separate Workout App project with a Node web service and
-Postgres in Frankfurt. Free tiers are a trial: the web service sleeps when idle,
-and the database expires after 30 days. Export backups or upgrade before expiry.
+`render.yaml` defines a Node web service in the separate Workout App project
+in Ben's Render workspace. Its database is a dedicated **free Supabase project**
+in the separate **Ben's Workout App** organization. Neither deployment depends
+on any Porter project, database, environment group or application credentials.
+Render compute sleeps when idle; Supabase's free project can pause after a week
+of inactivity. The Supabase database has no fixed 30-day trial expiration.
+
+The backend connects through Supabase's session pooler on port 5432 using a
+dedicated `workout_app` role. Its tables live in the private `workout` schema,
+which is not exposed through the Supabase Data API. Anonymous and authenticated
+API roles have no schema access. App tables also enable RLS; the backend-owned
+role uses the existing account-scoped SQL authorization.
+
+`DATABASE_SSL=true` enables verified TLS. `DATABASE_SSL_CA` holds the public
+Supabase root CA PEM (available in the project's SSL settings); verification is
+never disabled. Configure these and `DATABASE_URL` privately on the web service.
+The original Render database was copied with exact table-content verification
+and retained read-only as a rollback snapshot, rather than used by the app.
 
 With `DATABASE_URL` set, goals, exercises, legacy plans and completed workouts
 are stored in Postgres, scoped to the authenticated account. Without it the app
