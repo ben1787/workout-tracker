@@ -1,4 +1,4 @@
-import { requireAccount, isHosted } from './cloud.js';
+import { requireAccount } from './cloud.js';
 import { trackingFor, trackingResult } from './tracking.js';
 import * as db from './db.js';
 import { buildAIContext } from './ai-context.js';
@@ -664,12 +664,6 @@ const views = {
     root.appendChild(el('div', { class: 'spread' }, [el('h2', {}, 'Active goals'), el('button', { class: 'ghost', on: { click: () => go('goals') } }, 'Manage goals')]));
     if (!activeGoals.length) root.appendChild(el('p', {}, 'What would you like to work toward? Add any number of goals, and change them whenever you need.'));
     activeGoals.forEach(g => root.appendChild(el('div', { class: 'card' }, [el('h3', {}, g.title), g.details ? el('p', {}, g.details) : null])));
-    const last = lastExportAt();
-    if (state.workouts.length && (!last || Date.now() - last >= 7 * 86400000)) root.appendChild(el('div', { class: 'card backup-card' }, [
-      el('h3', {}, 'Keep your progress safe'),
-      el('p', {}, 'Your goals and history are saved on this device. Download a backup to keep or combine with another device.'),
-      el('button', { class: 'ghost', on: { click: exportData } }, 'Download backup'),
-    ]));
     if (state.workouts[0]) root.appendChild(el('div', { class: 'card' }, [
       el('div', { class: 'eyebrow' }, 'Last session'),
       el('h3', {}, state.workouts[0].day.name),
@@ -963,12 +957,7 @@ const views = {
 
   history(root) {
     pageHeader(root, 'History');
-    root.appendChild(el('div', { class: 'row' }, [
-      el('button', { class: 'ghost', on: { click: importData } }, 'Import backup'),
-      el('button', { class: 'ghost', on: { click: exportData } }, 'Export backup'),
-    ]));
-
-    root.appendChild(el('p', { class: 'muted' }, 'Import a JSON backup from another device to combine your history. Existing goals and sessions are kept; duplicates are skipped.'));
+    root.appendChild(el('button', { class: 'ghost', on: { click: downloadHistory } }, 'Download history'));
 
     if (state.workouts.length === 0) {
       root.appendChild(el('div', { class: 'empty' }, 'No completed sessions yet.'));
@@ -1674,53 +1663,23 @@ async function deleteHistoryEntry(w) {
   go('history');
 }
 
-async function importData() {
-  const input = document.createElement('input');
-  input.type = 'file';
-  input.accept = 'application/json,.json';
-  input.onchange = async () => {
-    const file = input.files?.[0];
-    if (!file) return;
-    try {
-      const data = JSON.parse(await file.text());
-      const result = await db.importBackup(data);
-      const catalog = await db.synchronizeExerciseCatalog({ draft: state.draft, active: state.active });
-      state.exercises = catalog.exercises; state.draft = catalog.draft; state.active = catalog.active;
-      if (state.draft) localStorage.setItem('wt.draft', JSON.stringify(state.draft));
-      saveActive();
-      state.plans = await db.listPlans();
-      state.workouts = await db.listWorkouts();
-      state.goals = await db.listGoals();
-      alert(`Added ${result.goals} goals and ${result.workouts} sessions. Skipped ${result.skipped} duplicates. Existing history was kept.`);
-      render();
-    } catch (e) {
-      alert('Import failed: ' + (e.message || e));
-    }
-  };
-  input.click();
-}
-
-const LAST_EXPORT_KEY = 'wt.lastExport';
-
-async function exportData() {
-  const data = await db.exportAll();
-  const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = `workout-tracker-${new Date().toISOString().slice(0, 10)}.json`;
-  document.body.appendChild(a);
-  a.click();
-  a.remove();
-  URL.revokeObjectURL(url);
-  localStorage.setItem(LAST_EXPORT_KEY, String(Date.now()));
-  toast('Backup downloaded');
-  render();
-}
-
-function lastExportAt() {
-  const v = Number(localStorage.getItem(LAST_EXPORT_KEY));
-  return Number.isFinite(v) && v > 0 ? v : null;
+async function downloadHistory() {
+  try {
+    const workouts = await db.listWorkouts();
+    const data = { exportedAt: new Date().toISOString(), workouts };
+    const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `workout-history-${new Date().toISOString().slice(0, 10)}.json`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+    toast('History downloaded');
+  } catch {
+    toast('Could not download history. Please try again.');
+  }
 }
 
 async function requestPersistence() {
@@ -1737,7 +1696,6 @@ async function requestPersistence() {
 
 async function init() {
   await requireAccount();
-  if(!isHosted()) {const migration=document.createElement('aside');migration.className='account-bar';migration.append(el('span',{},'Saved on this device'),el('button',{on:{click:exportData}},'Export for another device'));document.body.prepend(migration);}
   requestPersistence(); // best-effort; tells the browser not to evict our data
   state.plans = await db.listPlans();
   state.workouts = await db.listWorkouts();

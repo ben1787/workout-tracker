@@ -6,12 +6,12 @@ today's time/equipment/limitations/feeling, and all saved workout history. Revie
 its suggestion before starting; the existing circuit, set and timer tracker logs
 the session. Finishing opens Progress and automatically requests a GPT 6.1 Sol review
 of the completion against all saved history and active goals. Reviews are stored
-with the session and included in backups; revisiting does not regenerate them.
+with the session and included in history downloads; revisiting does not regenerate them.
 A failed review can be retried without losing the workout. Progress charts show
 weekly training frequency, logged reps, valid session time and exercise reps/load.
 Time spans over six hours are excluded from time charts as possible forgotten
 timers; original records remain untouched. Prescribed hold durations are not
-charted as actual results. Old programs are preserved in backups but no longer appear in the UI.
+charted as actual results. Old programs remain in storage but no longer appear in the UI.
 
 ## Run locally
 
@@ -29,11 +29,11 @@ outputs, and `store: false`. Active goals, today's details, and saved workout
 records (including notes) are sent to OpenAI only when requesting a suggestion.
 No automatic background generation or upload occurs.
 
-Keep using the same address/port to retain browser-local data. A different browser,
-hostname or device has separate storage. Backups combine these stores: History →
-Import backup adds new goals/sessions and skips IDs already present. It never
-replaces existing records. Exports contain goals, completed sessions and legacy
-plans; they do not contain an unfinished session or a workout suggestion.
+For local development, keep using the same address/port to retain browser-local
+records. The hosted app loads completed history from your account on every device.
+History → Download history downloads all saved sessions as JSON, including their
+exercise results, timestamps, notes and coaching, for reading elsewhere or
+uploading to ChatGPT. There are no import controls or backup reminders in the UI.
 
 ## Hosted account on Render
 
@@ -73,11 +73,10 @@ Use the private setup link to choose an email and a password (12+ characters).
 There is no public signup or email password-recovery service in this personal
 trial. An operator can reset access through the database if needed.
 
-Migration preserves the local copy. Export from the original browser or phone,
-then use History → Import backup after signing in to the hosted app. Imports
-append records and skip existing IDs atomically. A private bootstrap import can
-stage the owner's initial backup before enrollment; registration claims it in
-the same transaction and removes the staging copy. No history is publicly served.
+The initial migration preserved the local copy. A private bootstrap import staged
+the owner's existing history before enrollment; registration claims it in the
+same transaction and removes the staging copy. The app does not expose an import
+flow. No history is publicly served.
 
 Each saved record has a server revision. Edits made from a stale device receive
 a conflict instead of overwriting a newer record; refresh before retrying. AI
