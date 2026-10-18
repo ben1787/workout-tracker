@@ -12,6 +12,8 @@ test('local server protects credentials, rejects cross-origin calls and reports 
   // This test must stay local even when run during a hosted production build.
   for (const key of ['OPENAI_API_KEY', 'DATABASE_URL', 'PUBLIC_ORIGIN', 'RENDER', 'RENDER_EXTERNAL_URL', 'SETUP_TOKEN']) delete env[key];
   const server = spawn(process.execPath, ['server.mjs'], { cwd: new URL('..', import.meta.url), env, stdio: ['ignore', 'pipe', 'pipe'] });
+  let logs = '';
+  server.stdout.on('data', chunk => { logs += chunk; });
   t.after(() => server.kill());
   await Promise.race([once(server.stdout, 'data'), once(server, 'exit').then(() => { throw new Error('Server exited'); })]);
   const url = `http://127.0.0.1:${port}`;
@@ -35,4 +37,13 @@ test('local server protects credentials, rejects cross-origin calls and reports 
   assert.equal(badBody.status, 400);
   const badGoals = await fetch(`${url}/api/workout`, { ...request, body: JSON.stringify({ goals: [], history: [] }) });
   assert.equal(badGoals.status, 400);
+  const failure = await badGoals.json();
+  assert.equal(failure.requestId, badGoals.headers.get('x-request-id'));
+  await new Promise(resolve => setImmediate(resolve));
+  const entries = logs.split('\n').filter(line => line.startsWith('{')).map(line => JSON.parse(line));
+  const logged = entries.find(entry => entry.requestId === failure.requestId && entry.event === 'ai_failed');
+  assert.equal(logged.stage, 'input_validation');
+  assert.equal(logged.status, 400);
+  assert.ok(logged.durationMs >= 0);
+  assert.ok(!logs.includes('Strength'));
 });
