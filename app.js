@@ -337,7 +337,7 @@ function sectionDetails(section) {
   const definition = findExercise(state.exercises, section.exerciseId, section.exerciseName || section.name);
   const technique = section.exerciseInstructions || section.instructions || definition?.instructions;
   if (technique) children.push(el('p', {}, technique));
-  const video = videoLink(section.youtubeUrl);
+  const video = videoLink(section.youtubeUrl || definition?.youtubeUrl);
   if (video) children.push(video);
   if (section.type === 'exercise') children.push(el('p', { class: 'prescription' }, sectionSummary(section)));
 
@@ -874,6 +874,7 @@ const views = {
       const recorded = history.find(e => e.exerciseId === exercise.id);
       root.appendChild(disclosure(exercise.name, `${recorded?.entries.length || 0} recorded sessions · ${exercise.measurement}`, [
         el('p', {}, exercise.instructions || 'Technique instructions are supplied with each workout.'),
+        videoLink(exercise.youtubeUrl),
         exercise.aliases.length ? el('p', { class: 'muted' }, `Also recorded as: ${exercise.aliases.join(' · ')}`) : null,
         recorded ? el('button', { class: 'ghost', on: { click: () => { state.progressExercise = exercise.id; state.progressLoad = 'all'; go('progress'); } } }, 'View exercise progress') : null,
       ], 'card'));
@@ -1252,7 +1253,7 @@ function videoLink(value) {
 function exerciseInstructions(ex) {
   const definition = findExercise(state.exercises, ex.exerciseId, ex.exerciseName || ex.name);
   const instructions = [ex.exerciseInstructions || ex.instructions || definition?.instructions].filter(Boolean);
-  const video = videoLink(ex.youtubeUrl);
+  const video = videoLink(ex.youtubeUrl || definition?.youtubeUrl);
   const contents = instructions.length ? instructions.map(text => el('p', {}, text)) : [el('p', {}, 'No technique instructions saved for this older exercise.')];
   if (video) contents.push(video);
   return disclosure(ex.exerciseName || ex.name, ex.holdSeconds ? `${ex.holdSeconds}s target` : ex.reps ? `${ex.reps} reps target` : 'Instructions', contents);

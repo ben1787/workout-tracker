@@ -23,10 +23,10 @@ export function findExercise(catalog, id, name) {
   const wanted = key(canonicalName(name));
   return catalog.find(e => key(canonicalName(e.name)) === wanted || (e.aliases || []).some(alias => key(canonicalName(alias)) === wanted));
 }
-export function createExercise({ name, instructions = '', measurement = 'reps', aliases = [], id } = {}) {
+export function createExercise({ name, instructions = '', measurement = 'reps', aliases = [], id, youtubeUrl = '' } = {}) {
   if (typeof name !== 'string' || !name.trim() || name.length > 300 || !['reps', 'hold', 'distance', 'time'].includes(measurement) || typeof instructions !== 'string' || !Array.isArray(aliases) || aliases.some(a => typeof a !== 'string' || a.length > 300)) throw new Error('Exercise needs a name, a valid measurement, and valid aliases.');
   const canonical = canonicalName(name);
-  return { id: id || exerciseIdentity(canonical), name: canonical, instructions, measurement, aliases: [...new Set([name, ...aliases].filter(a => a && a !== canonical))] };
+  return { id: id || exerciseIdentity(canonical), name: canonical, instructions, measurement, ...(youtubeUrl ? {youtubeUrl} : {}), aliases: [...new Set([name, ...aliases].filter(a => a && a !== canonical))] };
 }
 
 function targetHold(name) {
@@ -45,24 +45,25 @@ export function linkExerciseRecords({ exercises = [], workouts = [], plans = [],
     if (existing) { redirects.set(exercise.id, existing.id); existing.aliases = [...new Set([...existing.aliases, exercise.name, ...exercise.aliases])].filter(name => name !== existing.name); }
     else catalog.push(exercise);
   }
-  const ensure = (name, id, instructions = '', measurement) => {
+  const ensure = (name, id, instructions = '', measurement, youtubeUrl) => {
     let exercise = findExercise(catalog, redirects.get(id) || id, name);
     if (!exercise) {
       exercise = createExercise({ name, instructions, measurement: measurement || (/\bhold\b/i.test(name) ? 'hold' : 'reps') });
       catalog.push(exercise);
     }
+    if (!exercise.youtubeUrl && youtubeUrl) exercise.youtubeUrl = youtubeUrl;
     if (name !== exercise.name && !exercise.aliases.includes(name)) exercise.aliases.push(name);
     return exercise;
   };
   const entry = ex => {
-    const exercise = ensure(ex.name, ex.exerciseId || ex.exercise_id, ex.instructions, !ex.reps && (targetHold(ex.name) || /\bhold\b/i.test(ex.name)) ? 'hold' : 'reps');
+    const exercise = ensure(ex.name, ex.exerciseId || ex.exercise_id, ex.instructions, !ex.reps && (targetHold(ex.name) || /\bhold\b/i.test(ex.name)) ? 'hold' : 'reps', ex.youtubeUrl || ex.youtube_url);
     return { ...ex, originalName: ex.originalName || ex.name, exerciseId: exercise.id, name: exercise.name, holdSeconds: ex.holdSeconds || ex.hold_seconds || (!ex.reps ? targetHold(ex.name) : 0) };
   };
   const sections = items => (items || []).map(section => {
     const out = { ...section };
     if (section.type === 'exercise') {
       const name = section.exerciseName || section.name;
-      const exercise = ensure(name, section.exerciseId, section.exerciseInstructions || section.instructions, !section.reps && (targetHold(name) || /\bhold\b/i.test(name)) ? 'hold' : 'reps');
+      const exercise = ensure(name, section.exerciseId, section.exerciseInstructions || section.instructions, !section.reps && (targetHold(name) || /\bhold\b/i.test(name)) ? 'hold' : 'reps', section.youtubeUrl || section.youtube_url);
       out.originalExerciseName = section.originalExerciseName || name;
       out.exerciseId = exercise.id; out.exerciseName = exercise.name;
       out.holdSeconds = section.holdSeconds || (!section.reps ? targetHold(name) : 0);
@@ -78,8 +79,8 @@ export function linkExerciseRecords({ exercises = [], workouts = [], plans = [],
         return linked;
       }) }));
     }
-    if (section.type === 'cardio') {
-      const exercise = ensure(section.name, section.exerciseId, section.instructions, 'distance');
+    if (section.type === 'cardio' || (['warmup','cooldown','mobility'].includes(section.type) && section.youtubeUrl)) {
+      const exercise = ensure(section.name, section.exerciseId, section.instructions, section.type === 'cardio' ? 'distance' : 'time', section.youtubeUrl || section.youtube_url);
       out.exerciseId = exercise.id;
     }
     return out;
@@ -116,10 +117,13 @@ export function resolveGeneratedExercises(data, existing = []) {
   for (const section of result.workout.sections) {
     for (const ex of section.exercises || []) {
       const exercise = resolve(ex.exercise_id, ex.name);
+      if (ex.youtube_url && exercise.youtubeUrl !== ex.youtube_url) { exercise.youtubeUrl = ex.youtube_url; if (!updates.includes(exercise)) updates.push(exercise); }
       ex.exercise_id = exercise.id; ex.name = exercise.name; used.add(exercise.id);
     }
-    if (section.type === 'cardio') {
-      const exercise = resolve(section.exercise_id, section.section_name);
+    if (['cardio','warmup','cooldown','mobility'].includes(section.type)) {
+      let exercise = findExercise(catalog, section.exercise_id, section.section_name);
+      if (!exercise) { exercise = createExercise({name:section.section_name, instructions:section.instructions, measurement:'time'}); catalog.push(exercise); updates.push(exercise); }
+      if (section.youtube_url && exercise.youtubeUrl !== section.youtube_url) { exercise.youtubeUrl = section.youtube_url; if (!updates.includes(exercise)) updates.push(exercise); }
       section.exercise_id = exercise.id; section.section_name = exercise.name; used.add(exercise.id);
     }
   }
