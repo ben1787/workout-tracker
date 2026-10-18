@@ -24,6 +24,8 @@ function rateLimit(req) {
   if(loginAttempts.size>10000) for(const [key,value] of loginAttempts) if(value.until<Date.now()) loginAttempts.delete(key);
 }
 let generating = false;
+const aiJobs = new Map();
+const jobOwner = user => user?.id || 'local';
 function json(res, status, value) {
   res.writeHead(status, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' });
   res.end(JSON.stringify(value));
@@ -76,11 +78,24 @@ const server = http.createServer(async (req, res) => {
     } catch(error) {return json(res,error.status || 503,{error:error.status?error.message:'Storage is temporarily unavailable. Please try again.'});}
   }
   if(!cloud && url.pathname==='/api/auth/session') return json(res,200,{cloud:false,user:null});
+  if (url.pathname.startsWith('/api/ai-jobs/') && req.method === 'GET') {
+    const job = aiJobs.get(url.pathname.slice('/api/ai-jobs/'.length));
+    if (!job || job.owner !== jobOwner(user) || job.expiresAt < Date.now()) return json(res,404,{error:'This AI request has expired. Please generate the workout again.'});
+    return json(res,200,{jobId:job.id,state:job.state,...(job.state === 'completed' ? {result:job.result} : job.state === 'failed' ? {error:job.error,status:job.status} : {})});
+  }
   if (url.pathname === '/api/status' && req.method === 'GET') return json(res, 200, { ready: !!process.env.OPENAI_API_KEY });
   if (AI_WORKFLOWS[url.pathname]) {
     if (req.method !== 'POST') return json(res, 405, { error: 'Use POST.' });
     if (req.headers['content-type'] !== 'application/json') return json(res, 415, { error: 'Use application/json.' });
-    const requestId = randomUUID();
+    const asyncRequest = req.headers.prefer === 'respond-async';
+    const suppliedId = String(req.headers['x-ai-request-id'] || '');
+    const requestId = asyncRequest && /^[a-f0-9-]{36}$/i.test(suppliedId) ? suppliedId : randomUUID();
+    for (const [id,job] of aiJobs) if (job.expiresAt < Date.now()) aiJobs.delete(id);
+    const existingJob = aiJobs.get(requestId);
+    if (asyncRequest && existingJob) {
+      if (existingJob.owner !== jobOwner(user) || existingJob.path !== url.pathname) return json(res,404,{error:'AI request not found.'});
+      return json(res,202,{jobId:requestId});
+    }
     const started = Date.now();
     const diagnostics = { stage: 'input_validation' };
     res.setHeader('X-Request-ID', requestId);
@@ -89,15 +104,29 @@ const server = http.createServer(async (req, res) => {
     log('ai_started');
     res.on('close', () => { if (!res.writableFinished) log('ai_client_disconnected'); });
     generating = true;
-    try {
-      const context = await body(req);
-      const suggestion = await runAIWorkflow(url.pathname, context, { apiKey: process.env.OPENAI_API_KEY, model: process.env.OPENAI_MODEL, diagnostics });
-      log('ai_completed', {status:200});
-      json(res, 200, suggestion);
-    } catch (error) {
-      log('ai_failed', {status:error.status || 502});
-      json(res, error.status || 502, { error: error.name === 'TimeoutError' ? 'AI took too long. Please try again.' : error.status ? error.message : 'Could not reach AI. Please try again.', requestId });
-    } finally { generating = false; }
+    let context;
+    try { context = await body(req); }
+    catch(error) { generating=false; log('ai_failed',{status:error.status || 400}); return json(res,error.status || 400,{error:error.message,requestId}); }
+    let job;
+    if (asyncRequest) {
+      while(aiJobs.size >= 20) aiJobs.delete(aiJobs.keys().next().value);
+      job = {id:requestId,owner:jobOwner(user),path:url.pathname,state:'running',expiresAt:Date.now()+20*60*1000};
+      aiJobs.set(requestId,job);
+      json(res,202,{jobId:requestId});
+    }
+    const run = async () => {
+      try {
+        const suggestion = await runAIWorkflow(url.pathname, context, { apiKey: process.env.OPENAI_API_KEY, model: process.env.OPENAI_MODEL, diagnostics });
+        log('ai_completed', {status:200});
+        if (job) {job.state='completed';job.result=suggestion;} else json(res,200,suggestion);
+      } catch(error) {
+        const status=error.status || 502;
+        const message=error.name === 'TimeoutError' ? 'AI took too long. Please try again.' : error.status ? error.message : 'Could not reach AI. Please try again.';
+        log('ai_failed',{status});
+        if (job) {job.state='failed';job.error=message;job.status=status;} else json(res,status,{error:message,requestId});
+      } finally {generating=false;}
+    };
+    if (job) void run(); else await run();
     return;
   }
   if (url.pathname.startsWith('/api/')) return json(res, 404, { error: 'Not found.' });

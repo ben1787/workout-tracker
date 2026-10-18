@@ -377,14 +377,19 @@ async function generateWorkout(feedback = null) {
   state.generating = true; state.revising = !!feedback; state.generationError = ''; state.revisionError = ''; render();
   try {
     const data = await requestAI('workout', buildAIContext({ workflow: 'workout', state, today, feedback }));
-    for (const exercise of data.catalogUpdates || []) await db.saveExercise(exercise);
-    state.exercises = await db.listExercises();
     const day = parseDay({ ...data.workout, day: 1 }, 0);
     if (typeof data.rationale !== 'string') throw new Error('The AI returned an incomplete workout. Please try again.');
     const conversation = feedback ? [...(previous.conversation || []), { role: 'user', content: feedback }, { role: 'assistant', content: data.message || 'Updated your workout.' }] : [];
     const draft = { id: uid(), day, rationale: data.rationale, goals, today, conversation, createdAt: now() };
     localStorage.setItem('wt.draft', JSON.stringify(draft));
     state.draft = draft; state.aiReady = true;
+    // Keep the usable suggestion even if a phone connection drops during catalog sync.
+    const updates = data.catalogUpdates || [];
+    state.exercises = [...new Map([...state.exercises,...updates].map(exercise=>[exercise.id,exercise])).values()];
+    void (async () => {
+      try { for (const exercise of updates) await db.saveExercise(exercise); }
+      catch { toast('Workout ready. Exercise details will sync when you reload.'); }
+    })();
     if (feedback) { state.feedback = ''; localStorage.removeItem('wt.feedback'); }
   } catch (error) {
     const message = error.name === 'TimeoutError' ? 'The suggestion took too long. Please try again.' : error.message || 'Could not connect to AI. Please try again.';
