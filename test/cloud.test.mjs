@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import pg from 'pg';
+import {createCloudStore} from '../cloud-store.mjs';
 import net from 'node:net';
 import { randomUUID } from 'node:crypto';
 import { spawn } from 'node:child_process';
@@ -32,6 +33,21 @@ test('hosted auth, owner enrollment, migration, account isolation and concurrent
   const enrolled=await call('/api/auth/register','POST',{email:'a@example.test',password:'long-test-password',invite:'test-owner-enrollment'});
   assert.equal(enrolled.status,200);assert.match(enrolled.cookie,/HttpOnly/);assert.match(enrolled.cookie,/SameSite=Lax/);
   const cookie=enrolled.cookie.split(';')[0];
+  const catalogStore=createCloudStore(connection.toString(),{secure:false});
+  await catalogStore.ready;
+  try {
+    const exercise={id:'catalog-merge-test',name:'Squat',instructions:'Edited on another device',measurement:'reps',aliases:[]};
+    await call('/api/data/exercises','PUT',{record:exercise},cookie);
+    const incoming={...exercise,instructions:'Old AI technique',youtubeUrl:'https://www.youtube.com/watch?v=abcdefghijk'};
+    await catalogStore.saveGeneratedExercises(enrolled.data.user,[incoming]);
+    const saved=(await call('/api/data/exercises/catalog-merge-test','GET',null,cookie)).data;
+    assert.equal(saved.instructions,exercise.instructions);assert.equal(saved.youtubeUrl,incoming.youtubeUrl);
+    await catalogStore.saveGeneratedExercises(enrolled.data.user,[{...incoming,youtubeUrl:'https://www.youtube.com/watch?v=zzzzzzzzzzz'}]);
+    const unchanged=(await call('/api/data/exercises/catalog-merge-test','GET',null,cookie)).data;
+    assert.equal(unchanged.youtubeUrl,saved.youtubeUrl);assert.equal(unchanged._serverRevision,saved._serverRevision);
+    // Remove only this disposable fixture so subsequent import counts remain stable.
+    await call('/api/data/exercises/catalog-merge-test','DELETE',null,cookie,{'If-Match':String(saved._serverRevision)});
+  } finally {await catalogStore.close();}
   assert.equal((await call('/api/data/workouts','GET',null,cookie)).data[0].id,'imported');
   assert.equal((await call('/api/auth/register','POST',{email:'b@example.test',password:'long-test-password',invite:'test-owner-enrollment'})).status,409);
   assert.equal((await call('/api/data/import','POST',seed,cookie)).data.skipped,2);

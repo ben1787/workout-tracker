@@ -96,6 +96,20 @@ export function createCloudStore(connectionString, {secure = true} = {}) {
         return {saved:true,record:record(result.rows[0])};
       });
     },
+    async saveGeneratedExercises(user, exercises) {
+      const records = exercises.map(item=>validateRecord(item,'exercises'));
+      await transaction(async client=>{
+        await client.query('SELECT id FROM app_users WHERE id=$1 FOR UPDATE',[user.id]);
+        for (const incoming of records) {
+          const current=(await client.query("SELECT data FROM app_records WHERE user_id=$1 AND kind='exercises' AND id=$2",[user.id,incoming.id])).rows[0]?.data;
+          // AI enriches missing metadata; it never overwrites another device's
+          // technique, name, aliases or an already saved demonstration.
+          const merged=current ? {...current,...(!current.youtubeUrl && incoming.youtubeUrl ? {youtubeUrl:incoming.youtubeUrl} : {})} : incoming;
+          if (current && JSON.stringify(merged)===JSON.stringify(current)) continue;
+          await client.query("INSERT INTO app_records(user_id,kind,id,data) VALUES($1,'exercises',$2,$3) ON CONFLICT(user_id,kind,id) DO UPDATE SET data=EXCLUDED.data,revision=app_records.revision+1",[user.id,incoming.id,merged]);
+        }
+      });
+    },
     async remove(user,kind,id,revision) {if(!stores.has(kind)) throw fail(404,'Unknown record type.'); const result=await pool.query('DELETE FROM app_records WHERE user_id=$1 AND kind=$2 AND id=$3 AND revision=$4',[user.id,kind,id,revision]); if(!result.rowCount) throw fail(409,'This record changed on another device. Reload before deleting it.'); return {deleted:true};},
     async import(user,data) {return transaction(async client=>{await client.query('SELECT id FROM app_users WHERE id=$1 FOR UPDATE',[user.id]); return append(client,user.id,data);});},
     async health() {await ready; await pool.query('SELECT 1');},

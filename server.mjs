@@ -117,6 +117,15 @@ const server = http.createServer(async (req, res) => {
     const run = async () => {
       try {
         const suggestion = await runAIWorkflow(url.pathname, context, { apiKey: process.env.OPENAI_API_KEY, model: process.env.OPENAI_MODEL, diagnostics });
+        if (cloud && Array.isArray(suggestion.catalogUpdates)) {
+          const catalogStarted=Date.now();
+          try {
+            await cloud.saveGeneratedExercises(user,suggestion.catalogUpdates);
+            suggestion.exerciseCatalog=await cloud.list(user,'exercises');
+            suggestion.catalogUpdates=[];
+          } catch { log('ai_catalog_sync_failed',{status:503}); }
+          diagnostics.catalogSyncMs=Date.now()-catalogStarted;
+        }
         log('ai_completed', {status:200});
         if (job) {job.state='completed';job.result=suggestion;} else json(res,200,suggestion);
       } catch(error) {

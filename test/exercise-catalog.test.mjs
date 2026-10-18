@@ -52,3 +52,8 @@ test('completion only and blank measurements remain unmeasured; flexible fields 
   assert.throws(()=>trackingResult(tracking,{holdSeconds:'-1'}));
   assert.throws(()=>validateTracking({fields:[{key:'__proto__',label:'bad',unit:'',type:'text'}]}));
 });
+
+test('catalog normalization retains the cloud revision for safe metadata saves',()=>{
+ const normalized=createExercise({name:'Squat',instructions:'Keep heels down.',measurement:'reps',_serverRevision:7});
+ assert.equal(normalized._serverRevision,7);
+});

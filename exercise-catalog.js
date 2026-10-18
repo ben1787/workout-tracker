@@ -23,10 +23,10 @@ export function findExercise(catalog, id, name) {
   const wanted = key(canonicalName(name));
   return catalog.find(e => key(canonicalName(e.name)) === wanted || (e.aliases || []).some(alias => key(canonicalName(alias)) === wanted));
 }
-export function createExercise({ name, instructions = '', measurement = 'reps', aliases = [], id, youtubeUrl = '' } = {}) {
+export function createExercise({ name, instructions = '', measurement = 'reps', aliases = [], id, youtubeUrl = '', _serverRevision } = {}) {
   if (typeof name !== 'string' || !name.trim() || name.length > 300 || !['reps', 'hold', 'distance', 'time'].includes(measurement) || typeof instructions !== 'string' || !Array.isArray(aliases) || aliases.some(a => typeof a !== 'string' || a.length > 300)) throw new Error('Exercise needs a name, a valid measurement, and valid aliases.');
   const canonical = canonicalName(name);
-  return { id: id || exerciseIdentity(canonical), name: canonical, instructions, measurement, ...(youtubeUrl ? {youtubeUrl} : {}), aliases: [...new Set([name, ...aliases].filter(a => a && a !== canonical))] };
+  return { id: id || exerciseIdentity(canonical), name: canonical, instructions, measurement, ...(youtubeUrl ? {youtubeUrl} : {}), ...(_serverRevision != null ? {_serverRevision} : {}), aliases: [...new Set([name, ...aliases].filter(a => a && a !== canonical))] };
 }
 
 function targetHold(name) {

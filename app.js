@@ -385,7 +385,7 @@ async function generateWorkout(feedback = null) {
     state.draft = draft; state.aiReady = true;
     // Keep the usable suggestion even if a phone connection drops during catalog sync.
     const updates = data.catalogUpdates || [];
-    state.exercises = [...new Map([...state.exercises,...updates].map(exercise=>[exercise.id,exercise])).values()];
+    state.exercises = data.exerciseCatalog || [...new Map([...state.exercises,...updates].map(exercise=>[exercise.id,exercise])).values()];
     void (async () => {
       try { for (const exercise of updates) await db.saveExercise(exercise); }
       catch { toast('Workout ready. Exercise details will sync when you reload.'); }
