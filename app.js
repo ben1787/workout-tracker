@@ -170,7 +170,7 @@ function parseSection(s, di, si) {
   if (!VALID_SECTION_TYPES.includes(s.type)) {
     throw new Error(`${where} (${name}): "type" must be one of ${VALID_SECTION_TYPES.join('|')}.`);
   }
-  const out = { name, type: s.type, tracking: s.tracking, exerciseId: s.exerciseId || s.exercise_id || null, instructions: typeof s.instructions === 'string' ? s.instructions : '', why: typeof s.why === 'string' ? s.why : '' };
+  const out = { name, youtubeUrl: s.youtubeUrl || s.youtube_url || '', type: s.type, tracking: s.tracking, exerciseId: s.exerciseId || s.exercise_id || null, instructions: typeof s.instructions === 'string' ? s.instructions : '', why: typeof s.why === 'string' ? s.why : '' };
 
   if (s.type === 'circuit') {
     const rounds = posOrNull(s.rounds);
@@ -193,7 +193,7 @@ function parseSection(s, di, si) {
     const first = parseExerciseEntry(s.exercises[0], `${where} (${name}) exercise 1`);
     out.exerciseName = first.name;
     out.exerciseId = first.exerciseId; out.holdSeconds = first.holdSeconds;
-    out.exerciseInstructions = first.instructions; out.tracking = first.tracking;
+    out.youtubeUrl = first.youtubeUrl || out.youtubeUrl; out.exerciseInstructions = first.instructions; out.tracking = first.tracking;
     out.reps = first.reps;
     out.weight = first.weight;
   } else if (TIMER_SECTION_TYPES.includes(s.type)) {
@@ -214,7 +214,7 @@ function parseExerciseEntry(ex, where) {
   const name = requireString(ex.name, where, 'name');
   const reps = nonNegOrZero(ex.reps);
   const weight = nonNegOrZero(ex.weight);
-  return { name, tracking: ex.tracking, exerciseId: ex.exerciseId || ex.exercise_id || null, holdSeconds: nonNegOrZero(ex.holdSeconds ?? ex.hold_seconds), reps, weight, instructions: typeof ex.instructions === 'string' ? ex.instructions : '' };
+  return { name, youtubeUrl: ex.youtubeUrl || ex.youtube_url || '', tracking: ex.tracking, exerciseId: ex.exerciseId || ex.exercise_id || null, holdSeconds: nonNegOrZero(ex.holdSeconds ?? ex.hold_seconds), reps, weight, instructions: typeof ex.instructions === 'string' ? ex.instructions : '' };
 }
 
 // ============================================================
@@ -335,10 +335,12 @@ function sectionPrescription(section) {
 function sectionDetails(section) {
   const children = [];
   const definition = findExercise(state.exercises, section.exerciseId, section.exerciseName || section.name);
-  if (definition?.instructions) children.push(el('p', {}, definition.instructions));
+  const technique = section.exerciseInstructions || section.instructions || definition?.instructions;
+  if (technique) children.push(el('p', {}, technique));
+  const video = videoLink(section.youtubeUrl);
+  if (video) children.push(video);
   if (section.type === 'exercise') children.push(el('p', { class: 'prescription' }, sectionSummary(section)));
-  if (section.instructions) children.push(el('p', {}, section.instructions));
-  if (section.exerciseInstructions && section.exerciseInstructions !== section.instructions) children.push(el('p', {}, section.exerciseInstructions));
+
   if (section.type === 'circuit') {
     if (section.interval_seconds) children.push(el('p', {}, `Round target: ${fmtDuration(section.interval_seconds * 1000)}`));
     section.exercises.forEach(ex => children.push(exerciseInstructions(ex)));
@@ -1239,10 +1241,21 @@ function sectionSummary(s) {
 // Section renderers (active session)
 // ============================================================
 
+function videoLink(value) {
+  try {
+    const url = new URL(value);
+    if (url.protocol !== 'https:' || !['youtube.com','www.youtube.com','m.youtube.com','youtu.be'].includes(url.hostname)) return null;
+    return el('a', {href:url.href, target:'_blank', rel:'noopener noreferrer'}, 'Watch demonstration on YouTube ↗');
+  } catch { return null; }
+}
+
 function exerciseInstructions(ex) {
   const definition = findExercise(state.exercises, ex.exerciseId, ex.exerciseName || ex.name);
-  const instructions = [...new Set([definition?.instructions, ex.exerciseInstructions || ex.instructions].filter(Boolean))];
-  return disclosure(ex.exerciseName || ex.name, ex.holdSeconds ? `${ex.holdSeconds}s target` : ex.reps ? `${ex.reps} reps target` : 'Instructions', instructions.length ? instructions.map(text => el('p', {}, text)) : [el('p', {}, 'No technique instructions saved for this older exercise.')]);
+  const instructions = [ex.exerciseInstructions || ex.instructions || definition?.instructions].filter(Boolean);
+  const video = videoLink(ex.youtubeUrl);
+  const contents = instructions.length ? instructions.map(text => el('p', {}, text)) : [el('p', {}, 'No technique instructions saved for this older exercise.')];
+  if (video) contents.push(video);
+  return disclosure(ex.exerciseName || ex.name, ex.holdSeconds ? `${ex.holdSeconds}s target` : ex.reps ? `${ex.reps} reps target` : 'Instructions', contents);
 }
 
 function resultDescription(result) {

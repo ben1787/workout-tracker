@@ -1,4 +1,5 @@
 import http from 'node:http';
+import { randomUUID } from 'node:crypto';
 import { createCloudStore } from './cloud-store.mjs';
 import { readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
@@ -79,14 +80,23 @@ const server = http.createServer(async (req, res) => {
   if (AI_WORKFLOWS[url.pathname]) {
     if (req.method !== 'POST') return json(res, 405, { error: 'Use POST.' });
     if (req.headers['content-type'] !== 'application/json') return json(res, 415, { error: 'Use application/json.' });
-    if (generating) return json(res, 429, { error: 'An AI request is already running. Please wait a moment.' });
+    const requestId = randomUUID();
+    const started = Date.now();
+    const diagnostics = { stage: 'input_validation' };
+    res.setHeader('X-Request-ID', requestId);
+    const log = (event, extra = {}) => console.log(JSON.stringify({ timestamp: new Date().toISOString(), event, requestId, workflow: AI_WORKFLOWS[url.pathname].name, model: process.env.OPENAI_MODEL || 'gpt-6.1-sol', durationMs: Date.now()-started, ...diagnostics, ...extra }));
+    if (generating) { log('ai_rejected', {status:429, failure:'busy'}); return json(res, 429, { error: 'An AI request is already running. Please wait a moment.', requestId }); }
+    log('ai_started');
+    res.on('close', () => { if (!res.writableFinished) log('ai_client_disconnected'); });
     generating = true;
     try {
       const context = await body(req);
-      const suggestion = await runAIWorkflow(url.pathname, context, { apiKey: process.env.OPENAI_API_KEY, model: process.env.OPENAI_MODEL });
+      const suggestion = await runAIWorkflow(url.pathname, context, { apiKey: process.env.OPENAI_API_KEY, model: process.env.OPENAI_MODEL, diagnostics });
+      log('ai_completed', {status:200});
       json(res, 200, suggestion);
     } catch (error) {
-      json(res, error.status || 502, { error: error.name === 'TimeoutError' ? 'AI took too long. Please try again.' : error.status ? error.message : 'Could not reach AI. Please try again.' });
+      log('ai_failed', {status:error.status || 502});
+      json(res, error.status || 502, { error: error.name === 'TimeoutError' ? 'AI took too long. Please try again.' : error.status ? error.message : 'Could not reach AI. Please try again.', requestId });
     } finally { generating = false; }
     return;
   }
