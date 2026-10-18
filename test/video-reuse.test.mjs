@@ -19,3 +19,21 @@ test('existing movement without a video gets one sourced lookup and a reusable c
  assert.equal(searches,1);assert.equal(result.catalogUpdates[0].youtubeUrl,video);
  const next=resolveGeneratedExercises(result,[createExercise(JSON.parse(JSON.stringify(result.catalogUpdates[0])))]);assert.equal(next.catalogUpdates.length,0);
 });
+
+test('compact generation restores catalog technique and unused fields without another model call',async()=>{
+ const compact=structuredClone(output);
+ const section=compact.workout.sections[0];
+ for(const key of ['rounds','duration_minutes','distance_miles','interval_seconds','target_intensity','exercise_id','youtube_url']) delete section[key];
+ delete section.exercises[0].instructions;delete section.exercises[0].youtube_url;
+ const diagnostics={};
+ const result=await suggestWorkout(context,{apiKey:'test',diagnostics,fetchImpl:async(url,options)=>{
+   const body=JSON.parse(options.body);
+   assert.equal(body.reasoning.effort,'low');assert.equal(body.text.verbosity,'low');
+   assert.equal(body.text.format.schema.properties.workout.properties.sections.items.anyOf.length,3);
+   return reply(compact);
+ }});
+ assert.equal(result.workout.sections[0].exercises[0].instructions,known.instructions);
+ assert.equal(result.workout.sections[0].rounds,0);
+ assert.equal(result.workout.sections[0].exercises[0].youtube_url,video);
+ assert.equal(diagnostics.calls.length,1);
+});
