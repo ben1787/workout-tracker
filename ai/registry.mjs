@@ -16,7 +16,9 @@ export const AI_WORKFLOWS = Object.freeze({
 export async function runAIWorkflow(path, rawContext, options = {}) {
   const workflow = AI_WORKFLOWS[path];
   if (!workflow) throw Object.assign(new Error('Unknown AI workflow.'), { status: 404 });
+  const preparedAt = performance.now();
   const context = prepareAIContext(rawContext);
+  if (options.diagnostics) options.diagnostics.contextPreparationMs = Math.round(performance.now()-preparedAt);
   try {
     if (context.workflow && context.workflow !== workflow.name) throw new Error('AI workflow context does not match this request.');
     workflow.validate(context, options.model || DEFAULT_MODEL);

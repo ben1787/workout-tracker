@@ -3,6 +3,9 @@ export const DEFAULT_MODEL = 'gpt-6.1-sol';
 // One server-only transport for every AI feature. No workflow implements fetch,
 // credential handling, model selection, refusal parsing, or timeouts on its own.
 export async function structuredResponse(request, { apiKey, fetchImpl = fetch, diagnostics = {}, sourcedUrls } = {}) {
+  const callStarted = performance.now();
+  const call = {phase: request.text?.format?.name || 'response'};
+  (diagnostics.calls ||= []).push(call);
   diagnostics.stage = 'credentials';
   if (!apiKey) throw Object.assign(new Error('AI is not connected yet. Add OPENAI_API_KEY to the app server. Your saved data is unchanged.'), { status: 503 });
   diagnostics.stage = 'provider_request';
@@ -16,6 +19,7 @@ export async function structuredResponse(request, { apiKey, fetchImpl = fetch, d
     diagnostics.failure = error.name === 'TimeoutError' ? 'timeout' : 'network_error';
     throw Object.assign(new Error(error.name === 'TimeoutError' ? 'AI took too long. Please try again.' : 'Could not reach AI. Please try again.'), { status: 502 });
   }
+  call.headersMs = Math.round(performance.now()-callStarted);
   diagnostics.providerStatus = response.status;
   diagnostics.providerRequestId = response.headers.get('x-request-id')?.replace(/[^a-zA-Z0-9_-]/g, '').slice(0,150);
   diagnostics.stage = 'provider_response';
@@ -26,6 +30,13 @@ export async function structuredResponse(request, { apiKey, fetchImpl = fetch, d
     throw Object.assign(new Error(response.status === 401 ? 'The server’s OpenAI API key was rejected.' : response.status === 429 ? 'AI’s request or billing limit was reached. Please try again later.' : 'AI could not complete the request. Your saved data is unchanged.'), { status: 502 });
   }
   const result = await response.json();
+  call.durationMs = Math.round(performance.now()-callStarted);
+  call.providerStatus = response.status;
+  call.providerRequestId = diagnostics.providerRequestId;
+  call.inputTokens = result.usage?.input_tokens;
+  call.cachedInputTokens = result.usage?.input_tokens_details?.cached_tokens;
+  call.outputTokens = result.usage?.output_tokens;
+  call.reasoningTokens = result.usage?.output_tokens_details?.reasoning_tokens;
   diagnostics.responseStatus = ['completed','incomplete','failed','cancelled','queued','in_progress'].includes(result.status) ? result.status : 'unknown';
   diagnostics.incompleteReason = ['max_output_tokens','content_filter'].includes(result.incomplete_details?.reason) ? result.incomplete_details.reason : undefined;
   for (const item of result.output || []) {

@@ -8,7 +8,10 @@ test('provider diagnostics retain correlation and failure metadata without conte
     apiKey:'secret', diagnostics,
     fetchImpl:async()=>new Response(JSON.stringify({status:'incomplete', incomplete_details:{reason:'max_output_tokens'},output:[]}),{headers:{'x-request-id':'req_test'}}),
   }));
-  assert.deepEqual(diagnostics,{stage:'provider_response',providerStatus:200,providerRequestId:'req_test',responseStatus:'incomplete',incompleteReason:'max_output_tokens',searchCalls:0});
+  const {calls, ...summary} = diagnostics;
+  assert.equal(calls.length,1);
+  assert.ok(calls[0].durationMs >= 0);
+  assert.deepEqual(summary,{stage:'provider_response',providerStatus:200,providerRequestId:'req_test',responseStatus:'incomplete',incompleteReason:'max_output_tokens',searchCalls:0});
   assert.ok(!JSON.stringify(diagnostics).includes('private'));
   const timedOut = {};
   await assert.rejects(structuredResponse({}, {apiKey:'secret',diagnostics:timedOut,fetchImpl:async()=>{throw new DOMException('private detail','TimeoutError');}}));
