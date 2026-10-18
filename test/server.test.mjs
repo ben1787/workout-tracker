@@ -46,4 +46,15 @@ test('local server protects credentials, rejects cross-origin calls and reports 
   assert.equal(logged.status, 400);
   assert.ok(logged.durationMs >= 0);
   assert.ok(!logs.includes('Strength'));
+  const jobId = crypto.randomUUID();
+  const asyncRequest = {...request,headers:{...request.headers,Prefer:'respond-async','X-AI-Request-ID':jobId}};
+  const queued = await fetch(`${url}/api/workout`,asyncRequest);
+  assert.equal(queued.status,202);assert.equal((await queued.json()).jobId,jobId);
+  const repeated = await fetch(`${url}/api/workout`,asyncRequest);
+  assert.equal(repeated.status,202);assert.equal((await repeated.json()).jobId,jobId);
+  const job = await (await fetch(`${url}/api/ai-jobs/${jobId}`)).json();
+  assert.equal(job.state,'failed');assert.equal(job.status,503);
+  assert.equal((await fetch(`${url}/api/ai-jobs/unknown`)).status,404);
+  await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(logs.split('\n').filter(line=>line.includes(jobId) && line.includes('ai_started')).length,1);
 });
