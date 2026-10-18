@@ -84,6 +84,11 @@ export async function suggestWorkout(context, options = {}) {
     }
   }
   if (options.diagnostics) options.diagnostics.stage = 'output_validation';
+  // The UI supplies clickable video citations; remove search-added Markdown clutter.
+  for (const item of [data, data.workout, ...(data.newExercises || []), ...(data.workout?.sections || []).flatMap(s => [s, ...(s.exercises || [])])]) {
+    if (!item) continue;
+    for (const field of ['instructions','why','rationale','notes','summary','message']) if (typeof item[field] === 'string') item[field] = item[field].replace(/\s*\(\[[^\]]+\]\(https?:\/\/[^)]+\)\)/g, '').replace(/\[([^\]]+)\]\(https?:\/\/[^)]+\)/g, '$1').trim();
+  }
   try { validateWorkout(data); return Array.isArray(context.exerciseCatalog) ? resolveGeneratedExercises(data, context.exerciseCatalog) : data; }
   catch { throw invalidResponse('AI returned an incomplete workout. Please try again.'); }
 }
