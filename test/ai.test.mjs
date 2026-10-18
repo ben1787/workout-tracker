@@ -18,8 +18,7 @@ test('request contains every historical record, active-goal context and structur
   assert.equal(JSON.parse(request.input).history.length, 55);
   assert.equal(request.model, 'configured-model');
   assert.equal(request.store, false);
-  assert.equal(request.tools[0].type, 'web_search');
-  assert.equal(request.tool_choice, 'required');
+  assert.equal(request.tools, undefined);
   assert.equal(request.text.format.type, 'json_schema');
   assert.equal(request.text.format.strict, true);
   assert.match(request.instructions, /forgotten timers/);
@@ -80,8 +79,8 @@ test('invalid actionable workout cannot enter the session tracker', () => {
 test('exercise instructions and purpose survive generation and missing details are rejected', async () => {
   const data = workout();
   data.workout.type = 'workout';
-  data.workout.sections = [{ section_name: 'Pull-ups', type: 'exercise', instructions: 'Use a secure bar. Perform 3 sets and rest 90 seconds.', why: 'Build pulling strength for muscle-ups.', rounds: 0, sets: 3, duration_minutes: 0, distance_miles: 0, interval_seconds: 0, target_intensity: '', exercises: [{ name: 'Pull-ups', youtube_url: 'https://www.youtube.com/watch?v=abcdefghijk', reps: 5, weight: 0, instructions: 'Brace, pull without swinging, then lower for 2 seconds.' }] }];
-  const result = await suggestWorkout(context(), { apiKey: 'test-only', fetchImpl: async () => reply(data) });
+  data.workout.sections = [{ section_name: 'Pull-ups', youtube_url: 'https://www.youtube.com/watch?v=abcdefghijk', type: 'exercise', instructions: 'Use a secure bar. Perform 3 sets and rest 90 seconds.', why: 'Build pulling strength for muscle-ups.', rounds: 0, sets: 3, duration_minutes: 0, distance_miles: 0, interval_seconds: 0, target_intensity: '', exercises: [{ name: 'Pull-ups', youtube_url: 'https://www.youtube.com/watch?v=abcdefghijk', reps: 5, weight: 0, instructions: 'Brace, pull without swinging, then lower for 2 seconds.' }] }];
+  const result = await suggestWorkout(context(), { apiKey: 'test-only', fetchImpl: async (url, options) => reply(JSON.parse(options.body).text.format.name === 'exercise_videos' ? {videos:[{name:'Pull-ups',youtube_url:'https://www.youtube.com/watch?v=abcdefghijk'}]} : data) });
   assert.deepEqual(result.workout.sections, data.workout.sections);
   data.workout.sections[0].exercises[0].youtube_url = 'https://www.youtube.com/watch?v=zzzzzzzzzzz';
   await assert.rejects(suggestWorkout(context(), {apiKey:'test-only', fetchImpl:async()=>reply(data)}), /demonstration/);
