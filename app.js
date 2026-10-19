@@ -833,15 +833,15 @@ const views = {
       if (isDone) {
         card.classList.add('done-section');
         card.appendChild(el('div', { class: 'spread' }, [
-          el('div', { class: 'muted' }, sec.skipped ? '⊘ skipped' : '✓ done'),
+          el('div', { class: 'muted' }, sec.skipped ? 'Not performed' : sec.endedEarly ? '✓ Ended early · recorded work saved' : '✓ done'),
           el('button', { class: 'ghost', on: { click: () => redoSection(si) } }, '↺ Re-do'),
         ]));
       } else if (isCurrent) {
         if (sec.type === 'circuit') renderCircuit(card, sec, si);
         else if (sec.type === 'exercise') renderExercise(card, sec, si);
         else if (TIMER_SECTION_TYPES.includes(sec.type)) renderCardio(card, sec, si);
-        // Skip-section escape hatch
-        card.appendChild(el('button', { class: 'ghost', on: { click: () => skipCurrentSection(si) } }, 'Skip this section'));
+        // End early while retaining already recorded work.
+        card.appendChild(el('button', { class: 'ghost', on: { click: () => endCurrentSection(si) } }, sec.type === 'circuit' ? 'End this circuit' : 'End exercise'));
       } else {
         card.appendChild(el('div', { class: 'muted' }, 'Up next'));
       }
@@ -1321,10 +1321,12 @@ function renderCircuit(card, sec, si) {
     const row = el('div', { class: 'card' });
     row.appendChild(exerciseInstructions(ex));
     const read = renderTracking(row, ex, !inRound);
-    const skip = el('input', { type: 'checkbox', 'aria-label': `Skip ${ex.name}` });
-    skip.disabled = !inRound;
-    row.appendChild(el('label', { class: 'row' }, [skip, el('span', {}, 'Skip this exercise')]));
-    readers.push(() => ({ name: ex.name, exerciseId: ex.exerciseId, ...(skip.checked ? { skipped: true, completed: false } : read()) }));
+    if (!ex.endedEarly) row.appendChild(el('button', {class:'ghost', on:{click:()=>{
+      if (!confirm(`End ${ex.name} for the remaining rounds? Earlier rounds stay saved. Finish the round first to save work from this round.`)) return;
+      ex.endedEarly=true; saveActive(); render();
+    }}}, 'End exercise'));
+    else row.appendChild(el('p', {class:'muted'}, 'Ended · earlier rounds saved'));
+    readers.push(() => ({ name: ex.name, exerciseId: ex.exerciseId, ...(ex.endedEarly ? { skipped: true, completed: false } : read()) }));
     exList.appendChild(row);
   });
   card.appendChild(exList);
@@ -1606,9 +1608,11 @@ function redoSection(si) {
   const sec = state.active.sections[si];
   sec.completed = false;
   sec.skipped = false;
+  delete sec.endedEarly;
   delete sec.trackingValues;
   if (sec.type === 'circuit') {
     sec.completedRounds = [];
+    sec.exercises.forEach(ex => {delete ex.endedEarly;});
     sec.currentRoundStartedAt = null;
   } else if (sec.type === 'exercise') {
     sec.completedSets = [];
@@ -1624,12 +1628,17 @@ function redoSection(si) {
   render();
 }
 
-function skipCurrentSection(si) {
-  if (!confirm('Skip this section? It will be marked as skipped in your history.')) return;
+function endCurrentSection(si) {
+  if (!confirm('End here? Completed sets and rounds will be saved. Any unfinished set or round will not be counted.')) return;
   armSession();
   const sec = state.active.sections[si];
-  sec.skipped = true;
+  const hasLoggedWork = (sec.completedSets || []).length > 0 || (sec.completedRounds || []).some(round => round.exercises.some(ex => !ex.skipped));
+  if (sec.timerStartedAt != null && sec.timerEndedAt == null) sec.timerEndedAt = now();
+  sec.skipped = !hasLoggedWork && !(sec.timerStartedAt != null && sec.timerEndedAt > sec.timerStartedAt);
+  sec.endedEarly = !sec.skipped;
   sec.completed = true;
+  sec.currentSetStartedAt = null;
+  sec.currentRoundStartedAt = null;
   saveActive();
   maybeAdvanceSection(si);
   render();
