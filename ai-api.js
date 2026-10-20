@@ -1,10 +1,10 @@
-export const AI_ENDPOINTS = Object.freeze({ workout: '/api/workout', progress: '/api/progress', correction: '/api/correct-result' });
+export const AI_ENDPOINTS = Object.freeze({ workout: '/api/workout', chat: '/api/workout-chat', progress: '/api/progress', correction: '/api/correct-result' });
 
 // The browser has no provider credentials and no direct model calls.
 export async function requestAI(workflow, context, {fetchImpl = fetch, pause = () => new Promise(resolve=>setTimeout(resolve,1500))} = {}) {
   const endpoint = AI_ENDPOINTS[workflow];
   if (!endpoint) throw new Error('Unknown AI workflow.');
-  const asyncRequest = workflow === 'workout';
+  const asyncRequest = ['workout','chat'].includes(workflow);
   const jobRequestId = crypto.randomUUID();
   const deadline = Date.now()+240000;
   const fetchJSON = async (url, options = {}) => {

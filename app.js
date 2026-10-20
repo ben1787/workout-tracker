@@ -25,6 +25,7 @@ const state = {
   goalError: '',
   generating: false,
   generationError: '',
+  chatting: false,
   revising: false,
   revisionError: '',
   feedback: loadJSON('wt.feedback', ''),
@@ -397,6 +398,20 @@ async function generateWorkout(feedback = null) {
   } finally { state.generating = false; state.revising = false; render(); }
 }
 
+async function sendWorkoutMessage(message) {
+  if (state.chatting || state.generating || !state.draft) return;
+  const draft = state.draft;
+  state.chatting = true; state.revisionError = ''; render();
+  try {
+    const reply = await requestAI('chat',buildAIContext({workflow:'chat',state,request:message}));
+    if (state.draft !== draft) return;
+    draft.conversation = [...(draft.conversation || []),{role:'user',content:message},{role:'assistant',content:reply.message}];
+    localStorage.setItem('wt.draft',JSON.stringify(draft));
+    state.feedback = ''; localStorage.removeItem('wt.feedback');
+  } catch(error) {state.revisionError = error.message || 'Could not reach the coach. Please try again.';}
+  finally {state.chatting = false; render();}
+}
+
 function draftGoalsChanged() {
   return state.draft && JSON.stringify(state.draft.goals) !== JSON.stringify(state.goals.filter(g => g.active).map(({ id, title, details }) => ({ id, title, details })));
 }
@@ -751,26 +766,29 @@ const views = {
       d.day.sections.forEach(section => sections.appendChild(disclosure(sectionTitle(section), sectionPrescription(section), sectionDetails(section), 'card exercise-disclosure')));
       root.appendChild(sections);
       if (draftGoalsChanged()) root.appendChild(el('p', { class: 'notice' }, 'Your active goals changed. Suggest a new workout to use your current goals.'));
-      root.appendChild(el('button', { class: 'primary', disabled: state.generating || draftGoalsChanged(), on: { click: startDailyWorkout } }, 'Start this workout'));
-      root.appendChild(el('button', { class: 'ghost', disabled: state.generating, on: { click: () => { state.draft = null; state.feedback = ''; state.revisionError = ''; localStorage.removeItem('wt.draft'); localStorage.removeItem('wt.feedback'); render(); } } }, 'Discard suggestion'));
-      const chat = el('form', { class: 'card workout-chat', 'aria-label': 'Adjust workout' });
-      chat.appendChild(el('h2', {}, 'Make it yours'));
+      root.appendChild(el('button', { class: 'primary', disabled: state.generating || state.chatting || draftGoalsChanged(), on: { click: startDailyWorkout } }, 'Start this workout'));
+      root.appendChild(el('button', { class: 'ghost', disabled: state.generating || state.chatting, on: { click: () => { state.draft = null; state.feedback = ''; state.revisionError = ''; localStorage.removeItem('wt.draft'); localStorage.removeItem('wt.feedback'); render(); } } }, 'Discard suggestion'));
+      const chat = el('form', { class: 'card workout-chat', 'aria-label': 'Chat about workout' });
+      chat.appendChild(el('h2', {}, 'Talk to your coach'));
       if (d.conversation?.length) {
         const messageList = items => el('div', { class: 'chat-messages', 'aria-label': 'Workout conversation' }, items.map(message => el('div', { class: `chat-message ${message.role}` }, [el('div', { class: 'eyebrow' }, message.role === 'user' ? 'You' : 'Coach'), el('p', {}, message.content)])));
-        if (d.conversation.length > 2) chat.appendChild(disclosure('Earlier changes', `${d.conversation.length / 2 - 1} requests`, [messageList(d.conversation.slice(0, -2))]));
+        if (d.conversation.length > 2) chat.appendChild(disclosure('Earlier conversation', `${Math.max(0,Math.floor(d.conversation.length / 2)-1)} exchanges`, [messageList(d.conversation.slice(0, -2))]));
         chat.appendChild(messageList(d.conversation.slice(-2)));
       }
-      const feedbackInput = field(chat, 'What would you like to change?', { placeholder: 'Swap an exercise, give me only five exercises, make it easier…', maxlength: 4000, required: true }, state.feedback, true);
-      feedbackInput.disabled = state.revising;
-      feedbackInput.addEventListener('input', () => { state.feedback = feedbackInput.value; localStorage.setItem('wt.feedback', JSON.stringify(state.feedback)); });
-      if (state.revisionError) chat.appendChild(el('div', { class: 'error', role: 'alert' }, state.revisionError));
-      if (state.revising) chat.appendChild(el('p', { role: 'status' }, 'Updating your workout…'));
-      chat.appendChild(el('button', { type: 'submit', class: 'primary', disabled: state.generating || !activeGoals.length }, state.revising ? 'Updating…' : 'Update workout'));
-      chat.addEventListener('submit', e => {
-        e.preventDefault();
-        const feedback = feedbackInput.value.trim();
-        if (feedback && !state.generating) generateWorkout(feedback);
-      });
+      const composer = el('div', {class:'chat-composer'});
+      const feedbackInput = field(composer, 'Message your coach', { placeholder: 'Ask a question or discuss changes…', maxlength:4000, required:true }, state.feedback, true);
+      feedbackInput.disabled = state.revising || state.chatting;
+      feedbackInput.addEventListener('input',()=>{state.feedback=feedbackInput.value;localStorage.setItem('wt.feedback',JSON.stringify(state.feedback));});
+      composer.appendChild(el('button',{type:'submit',class:'primary chat-send','aria-label':'Send message',disabled:state.generating||state.chatting},state.chatting?'…':'Send ↑'));
+      chat.appendChild(composer);
+      if (state.revisionError) chat.appendChild(el('div',{class:'error',role:'alert'},state.revisionError));
+      if (state.chatting || state.revising) chat.appendChild(el('p',{role:'status'},state.chatting?'Coach is replying…':'Updating your workout…'));
+      chat.appendChild(el('p',{class:'muted'},'Chat first. Your workout changes only when you click Update workout.'));
+      chat.appendChild(el('button',{type:'button',class:'primary',disabled:state.generating||state.chatting||!d.conversation?.length||!activeGoals.length,on:{click:()=>{
+        if (state.feedback.trim()) {state.revisionError='Send your message first so it is included in the conversation.';render();return;}
+        generateWorkout('Apply the changes agreed in our conversation to the current workout. Return the full updated workout now; preserve everything else.');
+      }}},state.revising?'Updating…':'Update workout'));
+      chat.addEventListener('submit',e=>{e.preventDefault();const message=feedbackInput.value.trim();if(message&&!state.generating&&!state.chatting)sendWorkoutMessage(message);});
       root.appendChild(chat);
     }
   },
