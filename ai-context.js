@@ -29,7 +29,8 @@ export function buildAIContext({ workflow, state, selectedWorkoutId, request, fe
     },
     date: chronology.date, timeZone: chronology.timeZone, timeContext: chronology.timeContext,
   };
-  if (workflow === 'workout') {
+  if (workflow === 'chat') { context.request = request; context.conversation = state.draft?.conversation || []; }
+  else if (workflow === 'workout') {
     if (feedback) { context.feedback = feedback; context.conversation = state.draft?.conversation || []; }
   } else if (workflow === 'progress') context.completedWorkoutId = selectedWorkoutId;
   else if (workflow === 'correction') { context.workout = workoutEvidence(selected); context.request = request; context.conversation = selected?.correctionConversation || []; }

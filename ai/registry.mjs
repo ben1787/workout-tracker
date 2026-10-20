@@ -1,3 +1,4 @@
+import {chatWorkout,chatRequest} from './chat.mjs';
 import { suggestWorkout, responseRequest } from './workout.mjs';
 import { reviewProgress, progressRequest } from './progress.mjs';
 import { correctResult, correctionRequest } from './correction.mjs';
@@ -8,6 +9,7 @@ import { prepareAIContext } from '../ai-context.js';
 // This is the complete AI capability surface. New UI features register here
 // rather than adding ad hoc API routes, model calls, or broad write authority.
 export const AI_WORKFLOWS = Object.freeze({
+  [AI_ENDPOINTS.chat]: {name:'chat',reads:'Current workout, full history, goals, progress and conversation',writes:'Conversation reply only; no workout mutations',validate:chatRequest,run:chatWorkout},
   [AI_ENDPOINTS.workout]: { name: 'workout', reads: 'Active goals, today, current suggestion, revision conversation, full corrected history and progress', writes: 'Returns a suggested workout; UI explicitly starts it', validate: responseRequest, run: suggestWorkout },
   [AI_ENDPOINTS.progress]: { name: 'progress', reads: 'Selected completion, active goals, constraints, full corrected history and computed progress', writes: 'Commentary only; never changes a result', validate: progressRequest, run: reviewProgress },
   [AI_ENDPOINTS.correction]: { name: 'correction', reads: 'Selected workout, its previous review and correction conversation, goals, constraints, current suggestion, active session, full corrected history and progress', writes: 'Validated operations on selected saved workout only; UI keeps undo', validate: correctionRequest, run: correctResult },

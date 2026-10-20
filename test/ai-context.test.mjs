@@ -44,7 +44,7 @@ test('API boundary also removes inactive goals and undo evidence', () => {
 });
 
 test('registry has a bounded workflow per UI action and rejects mismatched contexts', async () => {
-  assert.equal(Object.keys(AI_WORKFLOWS).length, 3);
+  assert.equal(Object.keys(AI_WORKFLOWS).length, 4);
   await assert.rejects(runAIWorkflow('/api/unknown', {}), error => error.status === 404);
   await assert.rejects(runAIWorkflow('/api/progress', { workflow: 'correction' }), error => error.status === 400);
 });
