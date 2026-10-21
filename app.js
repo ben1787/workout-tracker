@@ -179,6 +179,8 @@ function parseSection(s, di, si) {
     out.rounds = rounds;
     const iv = posOrNull(s.interval_seconds);
     if (iv) out.interval_seconds = iv;
+    const rest = posOrNull(s.rest_seconds);
+    if (rest) out.rest_seconds = rest;
     if (!Array.isArray(s.exercises) || s.exercises.length === 0) {
       throw new Error(`${where} (${name}): circuit needs non-empty "exercises" array.`);
     }
@@ -187,6 +189,8 @@ function parseSection(s, di, si) {
     const sets = posOrNull(s.sets);
     if (!sets) throw new Error(`${where} (${name}): exercise section needs "sets" > 0.`);
     out.sets = sets;
+    const rest = posOrNull(s.rest_seconds);
+    if (rest) out.rest_seconds = rest;
     if (!Array.isArray(s.exercises) || s.exercises.length === 0) {
       throw new Error(`${where} (${name}): exercise section needs "exercises" with at least one entry.`);
     }
@@ -612,7 +616,7 @@ function renderWorkoutRecord(root, w) {
         const rounds = el('div', { class: 'col' });
         sec.completedRounds.forEach((r, i) => {
           const dur = r.endedAt - r.startedAt;
-          const repsStr = r.exercises.map(e => `${e.name}: ${e.skipped ? 'Skipped' : resultDescription(e)}`).join(', ');
+          const repsStr = (r.partial ? 'Partial · ' : '') + r.exercises.map(e => `${e.name}: ${e.skipped ? 'Skipped' : resultDescription(e)}`).join(', ');
           rounds.appendChild(el('div', { class: 'set-row done' }, [
             el('div', { class: 'label' }, `${i + 1}`),
             el('div', { class: 'mono', style: 'text-align:left; grid-column: span 2;' }, repsStr),
@@ -1225,7 +1229,8 @@ function findPreviousSession(w) {
 }
 
 function circuitStats(sec) {
-  const durs = sec.completedRounds.map(r => r.endedAt - r.startedAt);
+  // A partial round was cut short by End, so its time is not a round split.
+  const durs = sec.completedRounds.filter(r => !r.partial).map(r => r.endedAt - r.startedAt);
   if (!durs.length) return null;
   return {
     avg: durs.reduce((a, b) => a + b, 0) / durs.length,
@@ -1244,11 +1249,12 @@ function sectionSummary(s) {
   if (s.type === 'circuit') {
     const exs = s.exercises.map(e => `${e.reps} ${e.name}${e.weight ? ` @${e.weight}lb` : ''}`).join(' / ');
     const iv = s.interval_seconds ? ` every ${fmtDuration(s.interval_seconds * 1000)}` : '';
-    return `${s.rounds} rounds${iv}: ${exs}`;
+    const rest = s.rest_seconds ? ` · rest ${fmtDuration(s.rest_seconds * 1000)}` : '';
+    return `${s.rounds} rounds${iv}${rest}: ${exs}`;
   }
   if (s.type === 'exercise') {
     const ex = s.exerciseName ? `${s.exerciseName} — ` : '';
-    return `${ex}${s.sets} × ${s.reps}${s.weight ? ` @${s.weight}lb` : ''}`;
+    return `${ex}${s.sets} × ${s.reps}${s.weight ? ` @${s.weight}lb` : ''}${s.rest_seconds ? ` · rest ${fmtDuration(s.rest_seconds * 1000)}` : ''}`;
   }
   if (TIMER_SECTION_TYPES.includes(s.type)) {
     const parts = [];
@@ -1283,6 +1289,7 @@ function exerciseInstructions(ex) {
 }
 
 function resultDescription(result) {
+  if (result.partial) return `Partial · ${resultDescription({ ...result, partial: false })}`;
   if (result.trackingValues) {
     const values = Object.values(result.trackingValues).map(field => `${field.label}: ${field.value}${field.unit ? ` ${field.unit}` : ''}`);
     return values.length ? values.join(' · ') : 'Done';
@@ -1326,6 +1333,8 @@ function renderCircuit(card, sec, si) {
     el('div', { class: 'big-stat-value' }, `${displayRound} / ${totalRounds}`),
   ]));
 
+  if (sec.restEndsAt != null) renderRest(card, sec, si);
+
   if (inRound) {
     // Live in-round timer (includes budget countdown when interval_seconds is set)
     const liveNode = el('div', { class: 'interval countdown', id: `round-${si}` }, 'In round 0:00');
@@ -1348,6 +1357,8 @@ function renderCircuit(card, sec, si) {
     exList.appendChild(row);
   });
   card.appendChild(exList);
+  if (inRound) partialReaders.set(si, () => readers.map(read => read()));
+  if (sec.restEndsAt != null) return;
   card.appendChild(el('button', { class: 'primary', on: { click: () => inRound ? completeCircuitRound(si, readers.map(read => read())) : startCircuitRound(si) } }, inRound ? `Round ${roundIdx + 1} complete` : `Start round ${roundIdx + 1}`));
 }
 
@@ -1365,9 +1376,11 @@ function renderExercise(card, sec, si) {
     ])),
   ]));
 
-  if (setIdx < sec.sets) {
+  if (setIdx < sec.sets && sec.restEndsAt != null) renderRest(card, sec, si);
+  else if (setIdx < sec.sets) {
     if (inSet) {
       const read = renderTracking(card, sec);
+      partialReaders.set(si, read);
       card.appendChild(el('button', { class: 'primary', on: { click: () => completeExerciseSet(si, read()) } }, 'Done'));
     } else {
       card.appendChild(el('div', { class: 'set-row' }, [
@@ -1530,7 +1543,46 @@ function maybeScrollToCurrent(root) {
   }
 }
 
+// Rest countdown between sets/rounds. When it reaches zero the next set/round
+// starts at the moment rest ended, so set times exclude rest even if the phone slept.
+const restTickers = new Map();
+function renderRest(card, sec, si) {
+  card.appendChild(el('div', { class: 'big-stat' }, [
+    el('div', { class: 'big-stat-label' }, 'Rest'),
+    el('div', { class: 'big-stat-value timer', id: `rest-${si}` }, fmtDuration(Math.max(0, sec.restEndsAt - now()))),
+  ]));
+  card.appendChild(el('button', { class: 'primary', on: { click: () => endRest(si, now()) } }, 'Start now'));
+  stopRestTicker(si);
+  const update = () => {
+    const node = document.getElementById(`rest-${si}`);
+    if (!node || sec.restEndsAt == null) { stopRestTicker(si); return; }
+    const remaining = sec.restEndsAt - now();
+    if (remaining > 0) { node.textContent = fmtDuration(remaining); return; }
+    playBeep(880, 300); buzz(250);
+    endRest(si, sec.restEndsAt);
+  };
+  restTickers.set(si, setInterval(update, 250));
+}
+function stopRestTicker(si) {
+  if (restTickers.has(si)) { clearInterval(restTickers.get(si)); restTickers.delete(si); }
+}
+function endRest(si, startAt) {
+  stopRestTicker(si);
+  const sec = state.active.sections[si];
+  if (sec.restEndsAt == null) return;
+  sec.restEndsAt = null;
+  if (sec.type === 'circuit') sec.currentRoundStartedAt = startAt;
+  else sec.currentSetStartedAt = startAt;
+  saveActive();
+  render();
+}
+// Reads the in-progress set/round inputs so End can save partial work.
+const partialReaders = new Map();
+
 function stopAllTickers() {
+  for (const t of restTickers.values()) clearInterval(t);
+  restTickers.clear();
+  partialReaders.clear();
   if (workoutTicker) { clearInterval(workoutTicker); workoutTicker = null; }
   for (const t of cardioTickers.values()) clearInterval(t);
   cardioTickers.clear();
@@ -1559,7 +1611,10 @@ function completeCircuitRound(si, exercisesLog) {
   // Always auto-start the next round so each round is one tap ('Round complete').
   // Even with an EMOM-style interval, the user can use the on-screen target
   // countdown to pace themselves without a separate Start tap.
-  if (sec.completedRounds.length < sec.rounds) {
+  if (sec.completedRounds.length < sec.rounds && sec.rest_seconds) {
+    sec.currentRoundStartedAt = null;
+    sec.restEndsAt = now() + sec.rest_seconds * 1000;
+  } else if (sec.completedRounds.length < sec.rounds) {
     sec.currentRoundStartedAt = now();
   } else {
     sec.currentRoundStartedAt = null;
@@ -1587,7 +1642,10 @@ function completeExerciseSet(si, result) {
     endedAt: now(),
   });
   // Auto-start the next set — one "Done" tap per set, no separate "Start".
-  if (sec.completedSets.length < sec.sets) {
+  if (sec.completedSets.length < sec.sets && sec.rest_seconds) {
+    sec.currentSetStartedAt = null;
+    sec.restEndsAt = now() + sec.rest_seconds * 1000;
+  } else if (sec.completedSets.length < sec.sets) {
     sec.currentSetStartedAt = now();
   } else {
     sec.currentSetStartedAt = null;
@@ -1627,6 +1685,7 @@ function redoSection(si) {
   sec.completed = false;
   sec.skipped = false;
   delete sec.endedEarly;
+  delete sec.restEndsAt;
   delete sec.trackingValues;
   if (sec.type === 'circuit') {
     sec.completedRounds = [];
@@ -1647,9 +1706,16 @@ function redoSection(si) {
 }
 
 function endCurrentSection(si) {
-  if (!confirm('End here? Completed sets and rounds will be saved. Any unfinished set or round will not be counted.')) return;
+  if (!confirm('End here? Completed sets and rounds will be saved, and an unfinished set or round is saved as partial with its time.')) return;
   armSession();
   const sec = state.active.sections[si];
+  // Reason: ending mid-set keeps the work done so far, e.g. 25s into a 40s hold (Ben 2026-10-21).
+  // Elapsed time is set duration, not a measured hold: it includes getting into position.
+  const read = partialReaders.get(si);
+  if (sec.type === 'exercise' && sec.currentSetStartedAt != null) sec.completedSets.push({ exerciseId: sec.exerciseId, ...(read ? read() : {}), partial: true, startedAt: sec.currentSetStartedAt, endedAt: now() });
+  if (sec.type === 'circuit' && sec.currentRoundStartedAt != null) sec.completedRounds.push({ startedAt: sec.currentRoundStartedAt, endedAt: now(), exercises: read ? read() : [], partial: true });
+  delete sec.restEndsAt;
+  stopRestTicker(si);
   const hasLoggedWork = (sec.completedSets || []).length > 0 || (sec.completedRounds || []).some(round => round.exercises.some(ex => !ex.skipped));
   if (sec.timerStartedAt != null && sec.timerEndedAt == null) sec.timerEndedAt = now();
   sec.skipped = !hasLoggedWork && !(sec.timerStartedAt != null && sec.timerEndedAt > sec.timerStartedAt);

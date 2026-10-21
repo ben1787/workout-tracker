@@ -69,17 +69,23 @@ test('invalid actionable workout cannot enter the session tracker', () => {
   const invalid = workout();
   invalid.workout.type = 'workout';
   assert.throws(() => validateWorkout(invalid), /incomplete/);
-  invalid.workout.sections = [{ section_name: 'Pull-ups', type: 'exercise', instructions: 'Pull smoothly. Rest 90 seconds between sets.', why: 'Build pulling strength.', rounds: 0, sets: 0, duration_minutes: 0, distance_miles: 0, interval_seconds: 0, target_intensity: '', exercises: [{ name: 'Pull-ups', youtube_url: 'https://www.youtube.com/watch?v=abcdefghijk', reps: 5, weight: 0, instructions: 'Start from a controlled hang, pull chin above bar and lower slowly.' }] }];
+  invalid.workout.sections = [{ section_name: 'Pull-ups', type: 'exercise', instructions: 'Pull smoothly. Rest 90 seconds between sets.', why: 'Build pulling strength.', rounds: 0, sets: 0, duration_minutes: 0, distance_miles: 0, interval_seconds: 0, rest_seconds: 90, target_intensity: '', exercises: [{ name: 'Pull-ups', youtube_url: 'https://www.youtube.com/watch?v=abcdefghijk', reps: 5, weight: 0, instructions: 'Start from a controlled hang, pull chin above bar and lower slowly.' }] }];
   assert.throws(() => validateWorkout(invalid), /incomplete/);
   invalid.workout.sections[0].sets = 3;
   assert.equal(validateWorkout(invalid), invalid);
+  invalid.workout.sections[0].rest_seconds = 0;
+  assert.throws(() => validateWorkout(invalid), /incomplete/, 'sets need a prescribed rest');
+  Object.assign(invalid.workout.sections[0], { type: 'circuit', sets: 0, rounds: 3 });
+  assert.throws(() => validateWorkout(invalid), /incomplete/, 'circuits need rest between rounds');
+  invalid.workout.sections[0].interval_seconds = 60;
+  assert.equal(validateWorkout(invalid), invalid, 'an interval-paced circuit has rest built in');
 });
 
 
 test('exercise instructions and purpose survive generation and missing details are rejected', async () => {
   const data = workout();
   data.workout.type = 'workout';
-  data.workout.sections = [{ section_name: 'Pull-ups', exercise_id: '', youtube_url: 'https://www.youtube.com/watch?v=abcdefghijk', type: 'exercise', instructions: 'Use a secure bar. Perform 3 sets and rest 90 seconds.', why: 'Build pulling strength for muscle-ups.', rounds: 0, sets: 3, duration_minutes: 0, distance_miles: 0, interval_seconds: 0, target_intensity: '', exercises: [{ name: 'Pull-ups', youtube_url: 'https://www.youtube.com/watch?v=abcdefghijk', reps: 5, weight: 0, instructions: 'Brace, pull without swinging, then lower for 2 seconds.' }] }];
+  data.workout.sections = [{ section_name: 'Pull-ups', exercise_id: '', youtube_url: 'https://www.youtube.com/watch?v=abcdefghijk', type: 'exercise', instructions: 'Use a secure bar. Perform 3 sets and rest 90 seconds.', why: 'Build pulling strength for muscle-ups.', rounds: 0, sets: 3, duration_minutes: 0, distance_miles: 0, interval_seconds: 0, rest_seconds: 90, target_intensity: '', exercises: [{ name: 'Pull-ups', youtube_url: 'https://www.youtube.com/watch?v=abcdefghijk', reps: 5, weight: 0, instructions: 'Brace, pull without swinging, then lower for 2 seconds.' }] }];
   const result = await suggestWorkout(context(), { apiKey: 'test-only', fetchImpl: async (url, options) => reply(JSON.parse(options.body).text.format.name === 'exercise_videos' ? {videos:[{name:'Pull-ups',youtube_url:'https://www.youtube.com/watch?v=abcdefghijk'}]} : data) });
   assert.deepEqual(result.workout.sections, data.workout.sections);
   data.workout.sections[0].exercises[0].youtube_url = 'https://www.youtube.com/watch?v=zzzzzzzzzzz';
