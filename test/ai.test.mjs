@@ -74,9 +74,9 @@ test('invalid actionable workout cannot enter the session tracker', () => {
   invalid.workout.sections[0].sets = 3;
   assert.equal(validateWorkout(invalid), invalid);
   invalid.workout.sections[0].rest_seconds = 0;
-  assert.throws(() => validateWorkout(invalid), /incomplete/, 'sets need a prescribed rest');
+  assert.equal(validateWorkout(invalid), invalid, 'zero rest allows continuous sets');
   Object.assign(invalid.workout.sections[0], { type: 'circuit', sets: 0, rounds: 3 });
-  assert.throws(() => validateWorkout(invalid), /incomplete/, 'circuits need rest between rounds');
+  assert.equal(validateWorkout(invalid), invalid, 'zero rest allows continuous rounds');
   invalid.workout.sections[0].interval_seconds = 60;
   assert.equal(validateWorkout(invalid), invalid, 'an interval-paced circuit has rest built in');
 });
