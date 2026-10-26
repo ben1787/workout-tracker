@@ -1543,25 +1543,28 @@ function maybeScrollToCurrent(root) {
   }
 }
 
-// Rest countdown between sets/rounds. When it reaches zero the next set/round
-// starts at the moment rest ended, so set times exclude rest even if the phone slept.
+// Rest countdown is advisory. The next set/round starts only on an explicit tap.
 const restTickers = new Map();
 function renderRest(card, sec, si) {
   card.appendChild(el('div', { class: 'big-stat' }, [
     el('div', { class: 'big-stat-label' }, 'Rest'),
     el('div', { class: 'big-stat-value timer', id: `rest-${si}` }, fmtDuration(Math.max(0, sec.restEndsAt - now()))),
   ]));
-  card.appendChild(el('button', { class: 'primary', on: { click: () => endRest(si, now()) } }, 'Start now'));
+  const startButton = el('button', { class: 'primary', on: { click: () => endRest(si, now()) } }, sec.type === 'circuit' ? 'Start next round' : 'Start next set');
+  card.appendChild(startButton);
   stopRestTicker(si);
   const update = () => {
     const node = document.getElementById(`rest-${si}`);
     if (!node || sec.restEndsAt == null) { stopRestTicker(si); return; }
     const remaining = sec.restEndsAt - now();
     if (remaining > 0) { node.textContent = fmtDuration(remaining); return; }
-    playBeep(880, 300); buzz(250);
-    endRest(si, sec.restEndsAt);
+    node.textContent = 'Ready';
+    startButton.textContent = sec.type === 'circuit' ? 'Start next round' : 'Start next set';
+    stopRestTicker(si);
+    if (!sec.restReadyNotified) { sec.restReadyNotified = true; playBeep(880, 300); buzz(250); saveActive(); }
   };
   restTickers.set(si, setInterval(update, 250));
+  update();
 }
 function stopRestTicker(si) {
   if (restTickers.has(si)) { clearInterval(restTickers.get(si)); restTickers.delete(si); }
@@ -1571,6 +1574,7 @@ function endRest(si, startAt) {
   const sec = state.active.sections[si];
   if (sec.restEndsAt == null) return;
   sec.restEndsAt = null;
+  delete sec.restReadyNotified;
   if (sec.type === 'circuit') sec.currentRoundStartedAt = startAt;
   else sec.currentSetStartedAt = startAt;
   saveActive();
@@ -1614,6 +1618,7 @@ function completeCircuitRound(si, exercisesLog) {
   if (sec.completedRounds.length < sec.rounds && sec.rest_seconds) {
     sec.currentRoundStartedAt = null;
     sec.restEndsAt = now() + sec.rest_seconds * 1000;
+    delete sec.restReadyNotified;
   } else if (sec.completedRounds.length < sec.rounds) {
     sec.currentRoundStartedAt = now();
   } else {
@@ -1645,6 +1650,7 @@ function completeExerciseSet(si, result) {
   if (sec.completedSets.length < sec.sets && sec.rest_seconds) {
     sec.currentSetStartedAt = null;
     sec.restEndsAt = now() + sec.rest_seconds * 1000;
+    delete sec.restReadyNotified;
   } else if (sec.completedSets.length < sec.sets) {
     sec.currentSetStartedAt = now();
   } else {
