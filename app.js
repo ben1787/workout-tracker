@@ -1561,7 +1561,7 @@ function startSetTicker(si) {
     node.textContent = fmtDuration(Math.max(0,now()-sec.currentSetStartedAt));
   };
   setTickers.set(si,setInterval(update,250));
-  update();
+  // First tick runs after the section card has been attached to the document.
 }
 
 // Rest countdown is advisory. The next set/round starts only on an explicit tap.
@@ -1585,7 +1585,7 @@ function renderRest(card, sec, si) {
     if (!sec.restReadyNotified) { sec.restReadyNotified = true; playBeep(880, 300); buzz(250); saveActive(); }
   };
   restTickers.set(si, setInterval(update, 250));
-  update();
+  // The card is mounted only after renderRest returns.
 }
 function stopRestTicker(si) {
   if (restTickers.has(si)) { clearInterval(restTickers.get(si)); restTickers.delete(si); }
