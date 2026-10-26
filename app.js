@@ -1379,6 +1379,11 @@ function renderExercise(card, sec, si) {
   if (setIdx < sec.sets && sec.restEndsAt != null) renderRest(card, sec, si);
   else if (setIdx < sec.sets) {
     if (inSet) {
+      card.appendChild(el('div', {class:'big-stat'}, [
+        el('div', {class:'big-stat-label'}, sec.holdSeconds ? `Set ${setIdx+1} · ${sec.holdSeconds}s target` : `Set ${setIdx+1} · elapsed`),
+        el('div', {class:'big-stat-value timer',id:`set-${si}`},fmtDuration(now()-sec.currentSetStartedAt)),
+      ]));
+      startSetTicker(si);
       const read = renderTracking(card, sec);
       partialReaders.set(si, read);
       card.appendChild(el('button', { class: 'primary', on: { click: () => completeExerciseSet(si, read()) } }, 'Done'));
@@ -1543,6 +1548,22 @@ function maybeScrollToCurrent(root) {
   }
 }
 
+// Recompute from the saved start timestamp so a resumed phone stays accurate.
+const setTickers = new Map();
+function startSetTicker(si) {
+  if (setTickers.has(si)) clearInterval(setTickers.get(si));
+  const update = () => {
+    const sec = state.active?.sections[si];
+    const node = document.getElementById(`set-${si}`);
+    if (!node || sec?.currentSetStartedAt == null) {
+      clearInterval(setTickers.get(si)); setTickers.delete(si); return;
+    }
+    node.textContent = fmtDuration(Math.max(0,now()-sec.currentSetStartedAt));
+  };
+  setTickers.set(si,setInterval(update,250));
+  update();
+}
+
 // Rest countdown is advisory. The next set/round starts only on an explicit tap.
 const restTickers = new Map();
 function renderRest(card, sec, si) {
@@ -1584,6 +1605,8 @@ function endRest(si, startAt) {
 const partialReaders = new Map();
 
 function stopAllTickers() {
+  for (const ticker of setTickers.values()) clearInterval(ticker);
+  setTickers.clear();
   for (const t of restTickers.values()) clearInterval(t);
   restTickers.clear();
   partialReaders.clear();

@@ -21,3 +21,11 @@ test('expired rest does not start a set until an explicit tap, including after r
  assert.equal(sec.currentSetStartedAt,undefined);assert.equal(sec.restEndsAt,1000);assert.equal(nodes.get('rest-0').textContent,'Ready');
  vm.runInNewContext('endRest(0,5000)',context);assert.equal(sec.currentSetStartedAt,5000);assert.equal(sec.restEndsAt,null);
 });
+test('live set elapsed timer starts immediately and advances from the saved timestamp',()=>{
+ const code=source.slice(source.indexOf('const setTickers = new Map();'),source.indexOf('// Rest countdown is advisory.'));
+ let clock=12000,tick,cleared=false;const node={};const sec={currentSetStartedAt:2000};
+ const context={state:{active:{sections:[sec]}},document:{getElementById:()=>node},now:()=>clock,fmtDuration:ms=>ms,setInterval:fn=>{tick=fn;return 1;},clearInterval(){cleared=true;}};
+ vm.runInNewContext(code+';startSetTicker(0)',context);assert.equal(node.textContent,10000);
+ clock=17000;tick();assert.equal(node.textContent,15000);
+ sec.currentSetStartedAt=null;tick();assert.equal(cleared,true);
+});
