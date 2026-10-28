@@ -1308,13 +1308,13 @@ function renderTracking(parent, ex, disabled = false) {
   const tracking = trackingFor(ex);
   const inputs = {};
   for (const field of tracking.fields) {
-    const input = el('input', { type: field.type === 'number' ? 'number' : 'text', min: '0', step: 'any', placeholder: 'Optional', 'aria-label': field.label });
+    const input = el('input', { type: field.type === 'number' ? 'number' : 'text', min: '0', step: 'any', placeholder: field.key === 'reps' && ex.reps > 0 && !ex.holdSeconds ? `${ex.reps} if left blank` : 'Optional', 'aria-label': field.label });
     input.disabled = disabled;
     inputs[field.key] = input;
     parent.appendChild(el('label', { class: 'col' }, [el('span', {}, `${field.label}${field.unit ? ` (${field.unit})` : ''}`), input]));
   }
   if (!tracking.fields.length) parent.appendChild(el('p', { class: 'muted' }, 'Completion only · no measurements needed'));
-  return () => trackingResult(tracking, Object.fromEntries(Object.entries(inputs).map(([key, input]) => [key, input.value])));
+  return (completed = true) => trackingResult(tracking, Object.fromEntries(Object.entries(inputs).map(([key, input]) => [key, input.value])), completed ? ex : {});
 }
 
 function renderCircuit(card, sec, si) {
@@ -1359,11 +1359,11 @@ function renderCircuit(card, sec, si) {
       ex.endedEarly=true; saveActive(); render();
     }}}, 'End exercise'));
     else row.appendChild(el('p', {class:'muted'}, 'Ended · earlier rounds saved'));
-    readers.push(() => ({ name: ex.name, exerciseId: ex.exerciseId, ...(ex.endedEarly ? { skipped: true, completed: false } : read()) }));
+    readers.push((completed = true) => ({ name: ex.name, exerciseId: ex.exerciseId, ...(ex.endedEarly ? { skipped: true, completed: false } : read(completed)) }));
     exList.appendChild(row);
   });
   card.appendChild(exList);
-  if (inRound) partialReaders.set(si, () => readers.map(read => read()));
+  if (inRound) partialReaders.set(si, () => readers.map(read => read(false)));
   if (sec.restEndsAt != null) return;
   card.appendChild(el('button', { class: 'primary', on: { click: () => inRound ? completeCircuitRound(si, readers.map(read => read())) : startCircuitRound(si) } }, inRound ? `Round ${roundIdx + 1} complete` : `Start round ${roundIdx + 1}`));
 }
@@ -1390,7 +1390,7 @@ function renderExercise(card, sec, si) {
         el('div', {class:'big-stat-value timer',id:`set-${si}`},fmtDuration(now()-sec.currentSetStartedAt)),
       ]));
       const read = renderTracking(card, sec);
-      partialReaders.set(si, read);
+      partialReaders.set(si, () => read(false));
       card.appendChild(el('button', { class: 'primary', on: { click: () => completeExerciseSet(si, read()) } }, 'Done'));
     } else {
       card.appendChild(el('div', { class: 'set-row' }, [

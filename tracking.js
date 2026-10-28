@@ -1,4 +1,4 @@
-// A prescription and a measured result are separate. Empty fields means done/skip.
+// Done confirms prescribed reps unless overridden; other measurements stay explicit.
 const reserved = new Set(['__proto__', 'constructor', 'prototype']);
 export function validateTracking(tracking) {
   if (!tracking || !Array.isArray(tracking.fields) || tracking.fields.length > 8) throw new Error('Invalid exercise tracking.');
@@ -11,7 +11,13 @@ export function validateTracking(tracking) {
   return tracking;
 }
 export function trackingFor(ex) {
-  if (ex.tracking) return validateTracking(ex.tracking);
+  if (ex.tracking) {
+    const tracking = validateTracking(ex.tracking);
+    if (ex.reps > 0 && !ex.holdSeconds && !tracking.fields.some(field => field.key === 'reps')) {
+      return { fields: [{ key: 'reps', label: 'Actual reps', unit: 'reps', type: 'number' }, ...tracking.fields] };
+    }
+    return tracking;
+  }
   // Conservative fallback for old routines; never add distance to a warm-up.
   const fields = [];
   const add = (key, label, unit) => fields.push({ key, label, unit, type: 'number' });
@@ -21,12 +27,14 @@ export function trackingFor(ex) {
   } else if (ex.type === 'cardio' && ex.distance_miles > 0) add('miles', 'Actual distance', 'mi');
   return { fields };
 }
-export function trackingResult(tracking, values) {
+export function trackingResult(tracking, values, prescription = {}) {
   validateTracking(tracking);
   const trackingValues = {};
   const result = { completed: true, trackingValues };
   for (const field of tracking.fields) {
-    const raw = values[field.key];
+    let raw = values[field.key];
+    if (field.key === 'reps' && (raw == null || String(raw).trim() === '') &&
+        Number.isFinite(prescription.reps) && prescription.reps > 0 && !prescription.holdSeconds) raw = prescription.reps;
     if (raw == null || String(raw).trim() === '') continue;
     const value = field.type === 'number' ? Number(raw) : String(raw).trim().slice(0, 1000);
     if (field.type === 'number' && (!Number.isFinite(value) || value < 0)) throw new Error('Enter a valid non-negative measurement.');

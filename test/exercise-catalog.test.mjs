@@ -57,3 +57,17 @@ test('catalog normalization retains the cloud revision for safe metadata saves',
  const normalized=createExercise({name:'Squat',instructions:'Keep heels down.',measurement:'reps',_serverRevision:7});
  assert.equal(normalized._serverRevision,7);
 });
+
+test('Done confirms target reps while explicit values and unfinished work stay distinct', () => {
+  const ex = {type:'exercise',reps:8,tracking:{fields:[]}};
+  const tracking = trackingFor(ex);
+  const result = trackingResult(tracking,{reps:''},ex);
+  assert.equal(result.reps,8);
+  assert.equal(result.trackingValues.reps.value,8);
+  assert.equal(trackingResult(tracking,{reps:'  '},ex).reps,8);
+  assert.equal(trackingResult(tracking,{reps:'5'},ex).reps,5);
+  assert.equal(trackingResult(tracking,{reps:'0'},ex).reps,0);
+  assert.equal(trackingResult(tracking,{reps:''}).reps,undefined);
+  assert.equal(trackingResult(tracking,{reps:''},{reps:8,holdSeconds:20}).reps,undefined);
+  assert.equal(ex.tracking.fields.length,0,'do not mutate the saved prescription');
+});
