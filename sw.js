@@ -1,4 +1,4 @@
-const VERSION = 'wt-v49';
+const VERSION = 'wt-v50';
 const ASSETS = [
   './',
   './index.html',
@@ -38,18 +38,13 @@ self.addEventListener('fetch', (e) => {
   const url = new URL(e.request.url);
   if (url.origin !== self.location.origin || url.pathname.startsWith('/api/')) return;
 
-  e.respondWith(
-    caches.match(e.request).then((cached) => {
-      const fetchPromise = fetch(e.request)
-        .then((res) => {
-          if (res && res.ok) {
-            const copy = res.clone();
-            caches.open(VERSION).then((c) => c.put(e.request, copy));
-          }
-          return res;
-        })
-        .catch(() => cached);
-      return cached || fetchPromise;
-    }),
-  );
+  const response = fetch(e.request).then(async (res) => {
+      if (res && res.ok) {
+        const copy = res.clone();
+        await caches.open(VERSION).then((cache) => cache.put(e.request, copy)).catch(() => {});
+      }
+      return res;
+    }).catch(() => caches.match(e.request));
+  e.respondWith(response);
+  e.waitUntil(response.then(() => {}));
 });

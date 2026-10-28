@@ -18,7 +18,7 @@ test('expired rest does not start a set until an explicit tap, including after r
  const sec={type:'exercise',restEndsAt:1000};const nodes=new Map();let tick,mounted=false,cleared=false;
  const context={state:{active:{sections:[sec]}},now:()=>2000,fmtDuration:()=>'',el:(tag,attrs,children)=>{const node={textContent:children};if(attrs.id)nodes.set(attrs.id,node);return node;},document:{getElementById:id=>mounted?nodes.get(id):null},setInterval:fn=>{tick=fn;return 1;},clearInterval(){cleared=true;},playBeep(){},buzz(){},saveActive(){},render(){}};
  vm.runInNewContext(code+';renderRest({appendChild(){}},state.active.sections[0],0)',context);
- assert.equal(cleared,false,'ticker must survive render before card mounts');mounted=true;tick();
+ assert.equal(cleared,false,'rendering rest must not start a ticker before mounting');mounted=true;vm.runInNewContext('startRestTicker(state.active.sections[0],0)',context);tick();
  assert.equal(sec.currentSetStartedAt,undefined);assert.equal(sec.restEndsAt,1000);assert.equal(nodes.get('rest-0').textContent,'Ready');
  vm.runInNewContext('endRest(0,5000)',context);assert.equal(sec.currentSetStartedAt,5000);assert.equal(sec.restEndsAt,null);
 });
@@ -26,7 +26,17 @@ test('live set elapsed timer starts immediately and advances from the saved time
  const code=source.slice(source.indexOf('const setTickers = new Map();'),source.indexOf('// Rest countdown is advisory.'));
  let clock=12000,tick,cleared=false,mounted=false;const node={};const sec={currentSetStartedAt:2000};
  const context={state:{active:{sections:[sec]}},document:{getElementById:()=>mounted?node:null},now:()=>clock,fmtDuration:ms=>ms,setInterval:fn=>{tick=fn;return 1;},clearInterval(){cleared=true;}};
- vm.runInNewContext(code+';startSetTicker(0)',context);assert.equal(cleared,false,'ticker must survive render before card mounts');mounted=true;tick();assert.equal(node.textContent,10000);
+ mounted=true;vm.runInNewContext(code+';startSetTicker(0)',context);assert.equal(cleared,false);assert.equal(node.textContent,10000);
  clock=17000;tick();assert.equal(node.textContent,15000);
  sec.currentSetStartedAt=null;tick();assert.equal(cleared,true);
+});
+
+test('rest counts down across repeated ticks and notifies once without starting the next set',()=>{
+ const code=source.slice(source.indexOf('const restTickers = new Map();'),source.indexOf('// Reads the in-progress'));
+ const sec={type:'exercise',restEndsAt:46000};let clock=1000,tick,beeps=0;const node={};
+ const context={state:{active:{sections:[sec]}},document:{getElementById:()=>node},now:()=>clock,fmtDuration:ms=>ms,setInterval:fn=>{tick=fn;return 1;},clearInterval(){},playBeep(){beeps++;},buzz(){},saveActive(){}};
+ vm.runInNewContext(code+';startRestTicker(state.active.sections[0],0)',context);
+ assert.equal(node.textContent,45000);
+ for(const time of [2000,3000,12000,45000]) {clock=time;tick();assert.equal(node.textContent,46000-time);}
+ clock=47000;tick();tick();assert.equal(node.textContent,'Ready');assert.equal(beeps,1);assert.equal(sec.currentSetStartedAt,undefined);
 });

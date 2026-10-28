@@ -8,7 +8,7 @@ import { workoutDuration } from './corrections.js';
 import { weeklyProgress, exerciseProgress, workoutMetrics, exerciseAtLoad } from './progress.js';
 
 if ('serviceWorker' in navigator) {
-  navigator.serviceWorker.register('sw.js').catch(() => {});
+  navigator.serviceWorker.register('sw.js', { updateViaCache: 'none' }).catch(() => {});
 }
 
 const ACTIVE_KEY = 'wt.active';
@@ -869,6 +869,13 @@ const views = {
       }
 
       root.appendChild(card);
+      // Start only after the live timer nodes are in the document.
+      if (isCurrent && !isDone) {
+        if (sec.restEndsAt != null) startRestTicker(sec, si);
+        else if (sec.type === 'exercise' && sec.currentSetStartedAt != null) startSetTicker(si);
+        else if (sec.type === 'circuit' && sec.currentRoundStartedAt != null) startRoundTicker(si);
+        else if (sec.timerStartedAt != null && sec.timerEndedAt == null) startCardioTicker(si);
+      }
     });
 
     startWorkoutTimer();
@@ -1339,7 +1346,6 @@ function renderCircuit(card, sec, si) {
     // Live in-round timer (includes budget countdown when interval_seconds is set)
     const liveNode = el('div', { class: 'interval countdown', id: `round-${si}` }, 'In round 0:00');
     card.appendChild(liveNode);
-    startRoundTicker(si);
   }
 
   const exList = el('div', { class: 'col' });
@@ -1383,7 +1389,6 @@ function renderExercise(card, sec, si) {
         el('div', {class:'big-stat-label'}, sec.holdSeconds ? `Set ${setIdx+1} · ${sec.holdSeconds}s target` : `Set ${setIdx+1} · elapsed`),
         el('div', {class:'big-stat-value timer',id:`set-${si}`},fmtDuration(now()-sec.currentSetStartedAt)),
       ]));
-      startSetTicker(si);
       const read = renderTracking(card, sec);
       partialReaders.set(si, read);
       card.appendChild(el('button', { class: 'primary', on: { click: () => completeExerciseSet(si, read()) } }, 'Done'));
@@ -1415,7 +1420,6 @@ function renderCardio(card, sec, si) {
   ]));
 
   if (inProgress) {
-    startCardioTicker(si);
     card.appendChild(el('button', { class: 'primary', on: { click: () => stopCardio(si) } }, 'Stop'));
   } else if (done) {
     const elapsedMs = sec.timerEndedAt - sec.timerStartedAt;
@@ -1561,7 +1565,7 @@ function startSetTicker(si) {
     node.textContent = fmtDuration(Math.max(0,now()-sec.currentSetStartedAt));
   };
   setTickers.set(si,setInterval(update,250));
-  // First tick runs after the section card has been attached to the document.
+  update();
 }
 
 // Rest countdown is advisory. The next set/round starts only on an explicit tap.
@@ -1573,6 +1577,8 @@ function renderRest(card, sec, si) {
   ]));
   const startButton = el('button', { class: 'primary', on: { click: () => endRest(si, now()) } }, sec.type === 'circuit' ? 'Start next round' : 'Start next set');
   card.appendChild(startButton);
+}
+function startRestTicker(sec, si) {
   stopRestTicker(si);
   const update = () => {
     const node = document.getElementById(`rest-${si}`);
@@ -1580,12 +1586,11 @@ function renderRest(card, sec, si) {
     const remaining = sec.restEndsAt - now();
     if (remaining > 0) { node.textContent = fmtDuration(remaining); return; }
     node.textContent = 'Ready';
-    startButton.textContent = sec.type === 'circuit' ? 'Start next round' : 'Start next set';
     stopRestTicker(si);
     if (!sec.restReadyNotified) { sec.restReadyNotified = true; playBeep(880, 300); buzz(250); saveActive(); }
   };
   restTickers.set(si, setInterval(update, 250));
-  // The card is mounted only after renderRest returns.
+  update();
 }
 function stopRestTicker(si) {
   if (restTickers.has(si)) { clearInterval(restTickers.get(si)); restTickers.delete(si); }
