@@ -43,7 +43,7 @@ test('load comparisons use matching sets, retain order and never turn targets in
 });
 test('completion only and blank measurements remain unmeasured; flexible fields preserve labels and units', () => {
   assert.deepEqual(trackingFor({type:'warmup',duration_minutes:6}).fields,[]);
-  assert.deepEqual(trackingFor({holdSeconds:20,reps:0}).fields,[]);
+  assert.equal(trackingFor({holdSeconds:20,reps:0}).fields[0].key,'holdSeconds');
   assert.deepEqual(trackingResult({fields:[]},{}),{completed:true,trackingValues:{}});
   const tracking={fields:[{key:'holdSeconds',label:'Actual hold',unit:'seconds',type:'number'},{key:'quality',label:'Technique',unit:'',type:'text'}]};
   assert.equal(trackingResult(tracking,{holdSeconds:''}).holdSeconds,undefined);
@@ -70,4 +70,15 @@ test('Done confirms target reps while explicit values and unfinished work stay d
   assert.equal(trackingResult(tracking,{reps:''}).reps,undefined);
   assert.equal(trackingResult(tracking,{reps:''},{reps:8,holdSeconds:20}).reps,undefined);
   assert.equal(ex.tracking.fields.length,0,'do not mutate the saved prescription');
+});
+
+test('Done confirms prescribed hold seconds without inferring time for partial work', () => {
+  for (const ex of [{holdSeconds:20,reps:0}, {holdSeconds:20,reps:0,tracking:{fields:[]}}, {holdSeconds:20,tracking:{fields:[{key:'holdSeconds',label:'Hold time',unit:'s',type:'number'}]}}]) {
+    const tracking=trackingFor(ex);
+    assert.equal(trackingResult(tracking,{holdSeconds:''},ex).holdSeconds,20);
+    assert.equal(trackingResult(tracking,{holdSeconds:'  '},ex).trackingValues.holdSeconds.value,20);
+    assert.equal(trackingResult(tracking,{holdSeconds:'12'},ex).holdSeconds,12);
+    assert.equal(trackingResult(tracking,{holdSeconds:'0'},ex).holdSeconds,0);
+    assert.equal(trackingResult(tracking,{holdSeconds:''}).holdSeconds,undefined);
+  }
 });

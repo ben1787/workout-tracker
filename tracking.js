@@ -1,4 +1,4 @@
-// Done confirms prescribed reps unless overridden; other measurements stay explicit.
+// Done confirms prescribed reps and holds unless overridden; other measurements stay explicit.
 const reserved = new Set(['__proto__', 'constructor', 'prototype']);
 export function validateTracking(tracking) {
   if (!tracking || !Array.isArray(tracking.fields) || tracking.fields.length > 8) throw new Error('Invalid exercise tracking.');
@@ -13,6 +13,9 @@ export function validateTracking(tracking) {
 export function trackingFor(ex) {
   if (ex.tracking) {
     const tracking = validateTracking(ex.tracking);
+    if (ex.holdSeconds > 0 && !tracking.fields.some(field => field.key === 'holdSeconds')) {
+      return { fields: [{ key: 'holdSeconds', label: 'Actual hold', unit: 'seconds', type: 'number' }, ...tracking.fields] };
+    }
     if (ex.reps > 0 && !ex.holdSeconds && !tracking.fields.some(field => field.key === 'reps')) {
       return { fields: [{ key: 'reps', label: 'Actual reps', unit: 'reps', type: 'number' }, ...tracking.fields] };
     }
@@ -22,6 +25,7 @@ export function trackingFor(ex) {
   const fields = [];
   const add = (key, label, unit) => fields.push({ key, label, unit, type: 'number' });
   if (!ex.type || ex.type === 'exercise') {
+    if (ex.holdSeconds > 0) add('holdSeconds', 'Actual hold', 'seconds');
     if (!ex.holdSeconds && ex.reps > 0) add('reps', 'Actual reps', 'reps');
     if (ex.weight > 0) add('weight', 'External load', 'lb');
   } else if (ex.type === 'cardio' && ex.distance_miles > 0) add('miles', 'Actual distance', 'mi');
@@ -35,6 +39,8 @@ export function trackingResult(tracking, values, prescription = {}) {
     let raw = values[field.key];
     if (field.key === 'reps' && (raw == null || String(raw).trim() === '') &&
         Number.isFinite(prescription.reps) && prescription.reps > 0 && !prescription.holdSeconds) raw = prescription.reps;
+    if (field.key === 'holdSeconds' && (raw == null || String(raw).trim() === '') &&
+        Number.isFinite(prescription.holdSeconds) && prescription.holdSeconds > 0) raw = prescription.holdSeconds;
     if (raw == null || String(raw).trim() === '') continue;
     const value = field.type === 'number' ? Number(raw) : String(raw).trim().slice(0, 1000);
     if (field.type === 'number' && (!Number.isFinite(value) || value < 0)) throw new Error('Enter a valid non-negative measurement.');

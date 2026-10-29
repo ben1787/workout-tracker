@@ -1308,7 +1308,7 @@ function renderTracking(parent, ex, disabled = false) {
   const tracking = trackingFor(ex);
   const inputs = {};
   for (const field of tracking.fields) {
-    const input = el('input', { type: field.type === 'number' ? 'number' : 'text', min: '0', step: 'any', placeholder: field.key === 'reps' && ex.reps > 0 && !ex.holdSeconds ? `${ex.reps} if left blank` : 'Optional', 'aria-label': field.label });
+    const input = el('input', { type: field.type === 'number' ? 'number' : 'text', min: '0', step: 'any', placeholder: field.key === 'reps' && ex.reps > 0 && !ex.holdSeconds ? `${ex.reps} if left blank` : field.key === 'holdSeconds' && ex.holdSeconds > 0 ? `${ex.holdSeconds} if left blank` : 'Optional', 'aria-label': field.label });
     input.disabled = disabled;
     inputs[field.key] = input;
     parent.appendChild(el('label', { class: 'col' }, [el('span', {}, `${field.label}${field.unit ? ` (${field.unit})` : ''}`), input]));
