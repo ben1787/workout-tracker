@@ -1779,14 +1779,20 @@ async function finishSession() {
     if (a.startedAt == null) a.startedAt = now();
     const record = { ...a, endedAt: now(), progressReviewStatus: 'pending' };
     delete record.currentSectionIdx;
-    await db.saveWorkout(record);
+    try { await db.saveWorkout(record); }
+    catch (error) {
+      // Reason: a save can land on the server while the reply is lost (weak signal);
+      // every retry then conflicts with that saved copy. If it is there, we are done.
+      const saved = await db.getWorkout(record.id).catch(() => null);
+      if (!saved) throw error;
+    }
     state.workouts = await db.listWorkouts();
     state.active = null;
     saveActive(); releaseWakeLock(); stopAllTickers();
     go('progress', { progressWorkoutId: record.id });
     reviewCompletedWorkout(record.id);
-  } catch {
-    state.finishError = 'Could not save your workout. Your session is still here; please try again.';
+  } catch (error) {
+    state.finishError = `Could not save your workout${error?.message ? ` (${error.message})` : ''}. Your session is still here; please try again.`;
   } finally {
     state.finishing = false;
     if (state.view === 'session') render();
