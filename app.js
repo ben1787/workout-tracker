@@ -1771,13 +1771,28 @@ function maybeAdvanceSection(si) {
   saveActive();
 }
 
+// Reason: a session left open for days (forgot to tap Finish) should end at the
+// last logged work, not when Finish is finally tapped (Ben 2026-11-13).
+const IDLE_FINISH_MS = 60 * 60 * 1000;
+function finishTime(a) {
+  const times = [a.startedAt];
+  for (const sec of a.sections || []) {
+    for (const set of sec.completedSets || []) times.push(set.endedAt, set.startedAt);
+    for (const round of sec.completedRounds || []) times.push(round.endedAt, round.startedAt);
+    times.push(sec.timerEndedAt, sec.timerStartedAt, sec.currentSetStartedAt, sec.currentRoundStartedAt, sec.endedAt);
+  }
+  const last = Math.max(...times.filter(Number.isFinite));
+  const t = now();
+  return Number.isFinite(last) && t - last > IDLE_FINISH_MS ? last : t;
+}
+
 async function finishSession() {
   if (state.finishing || !state.active) return;
   state.finishing = true; state.finishError = ''; render();
   try {
     const a = state.active;
     if (a.startedAt == null) a.startedAt = now();
-    const record = { ...a, endedAt: now(), progressReviewStatus: 'pending' };
+    const record = { ...a, endedAt: finishTime(a), progressReviewStatus: 'pending' };
     delete record.currentSectionIdx;
     try { await db.saveWorkout(record); }
     catch (error) {
