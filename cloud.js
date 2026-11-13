@@ -2,7 +2,7 @@ let hosted = false;
 export const isHosted = () => hosted;
 export async function cloudRequest(path, options = {}) {
   const response=await fetch(path,{...options, headers:{'Content-Type':'application/json',...options.headers},cache:'no-store'});
-  const data=await response.json();
+  const data=await response.json().catch(()=>({error:response.ok?'Unexpected reply from the server.':`Server error ${response.status}.`}));
   if(!response.ok) throw new Error(data.error || 'Could not save to your account.');
   return data;
 }

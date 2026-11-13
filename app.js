@@ -1771,22 +1771,43 @@ function maybeAdvanceSection(si) {
   saveActive();
 }
 
+// Reason: a session left open for days (forgot to tap Finish) should end at the
+// last logged work, not when Finish is finally tapped (Ben 2026-11-13).
+const IDLE_FINISH_MS = 60 * 60 * 1000;
+function finishTime(a) {
+  const times = [a.startedAt];
+  for (const sec of a.sections || []) {
+    for (const set of sec.completedSets || []) times.push(set.endedAt, set.startedAt);
+    for (const round of sec.completedRounds || []) times.push(round.endedAt, round.startedAt);
+    times.push(sec.timerEndedAt, sec.timerStartedAt, sec.currentSetStartedAt, sec.currentRoundStartedAt, sec.endedAt);
+  }
+  const last = Math.max(...times.filter(Number.isFinite));
+  const t = now();
+  return Number.isFinite(last) && t - last > IDLE_FINISH_MS ? last : t;
+}
+
 async function finishSession() {
   if (state.finishing || !state.active) return;
   state.finishing = true; state.finishError = ''; render();
   try {
     const a = state.active;
     if (a.startedAt == null) a.startedAt = now();
-    const record = { ...a, endedAt: now(), progressReviewStatus: 'pending' };
+    const record = { ...a, endedAt: finishTime(a), progressReviewStatus: 'pending' };
     delete record.currentSectionIdx;
-    await db.saveWorkout(record);
+    try { await db.saveWorkout(record); }
+    catch (error) {
+      // Reason: a save can land on the server while the reply is lost (weak signal);
+      // every retry then conflicts with that saved copy. If it is there, we are done.
+      const saved = await db.getWorkout(record.id).catch(() => null);
+      if (!saved) throw error;
+    }
     state.workouts = await db.listWorkouts();
     state.active = null;
     saveActive(); releaseWakeLock(); stopAllTickers();
     go('progress', { progressWorkoutId: record.id });
     reviewCompletedWorkout(record.id);
-  } catch {
-    state.finishError = 'Could not save your workout. Your session is still here; please try again.';
+  } catch (error) {
+    state.finishError = `Could not save your workout${error?.message ? ` (${error.message})` : ''}. Your session is still here; please try again.`;
   } finally {
     state.finishing = false;
     if (state.view === 'session') render();
